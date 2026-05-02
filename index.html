@@ -177,6 +177,28 @@
   }
   .col-dl-btn:hover { color: var(--accent); border-color: var(--accent); }
   .col-dl-btn:disabled { opacity: 0.5; cursor: wait; }
+  .col-dl-btn svg { width: 12px; height: 12px; }
+
+  /* per-card download button */
+  .card-dl-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-3);
+    width: 20px; height: 20px;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 10px;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+    font-family: inherit;
+    opacity: 0;
+    transition: opacity .12s;
+    padding: 0;
+    line-height: 1;
+  }
+  .card:hover .card-dl-btn { opacity: 1; }
+  .card-dl-btn:hover { color: var(--accent); border-color: var(--accent); }
+  .card-dl-btn svg { width: 11px; height: 11px; }
   .col-body { flex: 1; overflow-y: auto; padding: 4px 0 16px; }
 
   /* PROJECT CARDS */
@@ -565,8 +587,8 @@
   </div>
   <span class="status-tag" id="statTag">未選択</span>
   <div class="seg" style="margin-left: auto;">
-    <button class="active" id="viewThumb">サムネ</button>
-    <button id="viewList">LIST</button>
+    <button id="viewThumb">サムネ</button>
+    <button class="active" id="viewList">LIST</button>
   </div>
 </div>
 
@@ -643,7 +665,7 @@ const state = {
   rootChildren: [],     // top-level dirs as columns
   pathMap: new Map(),
   filter: 'all',
-  view: 'thumb',
+  view: 'list',
   selectedPath: null,
   audioQueue: [],
   audioIndex: -1,
@@ -858,7 +880,7 @@ function renderColumns() {
         <div class="col-header">
           <span class="col-title">${escapeHtml(dir.name)}</span>
           <span class="col-count">${totalCount}</span>
-          <button class="col-dl-btn" data-dir-path="${escapeHtml(dir.path)}" title="このフォルダを ZIP でダウンロード">↓</button>
+          <button class="col-dl-btn" data-dir-path="${escapeHtml(dir.path)}" title="このフォルダを ZIP でダウンロード"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12m0 0l-5-5m5 5l5-5"/><path d="M4 21h16"/></svg></button>
         </div>
         <div class="col-body"></div>
       `;
@@ -920,12 +942,17 @@ function createCard(file) {
         <div class="card-row">
           <span class="card-sender">${typeLabel}</span>
           ${timeRight}
+          <button class="card-dl-btn" title="ダウンロード"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12m0 0l-5-5m5 5l5-5"/><path d="M4 21h16"/></svg></button>
         </div>
         <span class="card-title">${escapeHtml(file.name)}</span>
       </div>
     `;
     card.addEventListener('click', () => onCardClick(file));
     card.addEventListener('dblclick', () => onCardDblClick(file));
+    card.querySelector('.card-dl-btn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      downloadFile(file);
+    });
     return card;
   }
 
@@ -951,12 +978,35 @@ function createCard(file) {
       <div class="card-row">
         <span class="card-sender">${typeLabel}</span>
         ${timeRight}
+        <button class="card-dl-btn" title="ダウンロード"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12m0 0l-5-5m5 5l5-5"/><path d="M4 21h16"/></svg></button>
       </div>
       <div class="card-title">${escapeHtml(file.name)}</div>
     </div>
   `;
   card.addEventListener('click', () => onCardClick(file));
+  card.addEventListener('dblclick', () => onCardDblClick(file));
+  card.querySelector('.card-dl-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    downloadFile(file);
+  });
   return card;
+}
+
+async function downloadFile(file) {
+  try {
+    const f = await file.handle.getFile();
+    const url = URL.createObjectURL(f);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = file.name;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } catch (e) {
+    console.error(e);
+    alert('ダウンロード失敗: ' + e.message);
+  }
 }
 
 async function loadImageThumbs() {
