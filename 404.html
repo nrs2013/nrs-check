@@ -79,6 +79,58 @@
     border: 1px solid var(--border);
   }
   .header-btn.ghost:hover { color: var(--text); border-color: var(--border-strong); }
+  .header-btn.connected {
+    background: rgba(212, 146, 90, 0.18);
+    color: var(--accent);
+    border: 1px solid rgba(212, 146, 90, 0.4);
+  }
+
+  /* MODAL */
+  .modal {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.6);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 200;
+  }
+  .modal-card {
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 12px;
+    padding: 20px;
+    width: 480px; max-width: 90vw;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.6);
+  }
+  .modal-title {
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 8px;
+  }
+  .modal-hint {
+    color: var(--text-3);
+    font-size: 11.5px;
+    line-height: 1.6;
+    margin-bottom: 14px;
+  }
+  .modal-card input[type="text"] {
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 9px 11px;
+    border-radius: 6px;
+    font-size: 12.5px;
+    font-family: 'Menlo', 'Courier New', monospace;
+    margin-bottom: 14px;
+    box-sizing: border-box;
+  }
+  .modal-card input[type="text"]:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .modal-actions {
+    display: flex; justify-content: flex-end; gap: 8px;
+  }
 
   /* FILTER BAR */
   .filterbar {
@@ -178,6 +230,56 @@
   .col-dl-btn:hover { color: var(--accent); border-color: var(--accent); }
   .col-dl-btn:disabled { opacity: 0.5; cursor: wait; }
   .col-dl-btn svg { width: 12px; height: 12px; }
+
+  /* drag handle on column header */
+  .col-handle {
+    color: var(--text-3);
+    cursor: grab;
+    font-size: 11px;
+    letter-spacing: -1px;
+    user-select: none;
+    margin-right: -4px;
+  }
+  .col-handle:active { cursor: grabbing; }
+  .column.dragging { opacity: 0.4; }
+  .column.drag-over-left { box-shadow: inset 3px 0 0 0 var(--accent); }
+  .column.drag-over-right { box-shadow: inset -3px 0 0 0 var(--accent); }
+  /* extra (extracted) column accent */
+  .column.col-extracted .col-title::before {
+    content: '↗ ';
+    color: var(--accent);
+    font-size: 10px;
+    margin-right: 2px;
+  }
+  /* group extract button */
+  .group-action {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-3);
+    width: 18px; height: 18px;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 9px;
+    display: inline-flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+    font-family: inherit;
+    margin-left: 4px;
+    line-height: 1;
+    padding: 0;
+  }
+  .group-action:hover { color: var(--accent); border-color: var(--accent); }
+  .col-merge-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-3);
+    padding: 2px 7px;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 10px;
+    font-family: inherit;
+    margin-left: 4px;
+  }
+  .col-merge-btn:hover { color: var(--accent); border-color: var(--accent); }
 
   /* per-card download button — top-right floating */
   .card-dl-btn {
@@ -587,7 +689,22 @@
     <div class="app-sub" id="appSub">フォルダ未選択</div>
   </div>
   <div class="header-spacer"></div>
+  <button class="header-btn ghost" id="addLinkBtn" title="Dropbox 共有リンクを追加">+ リンク</button>
+  <button class="header-btn ghost" id="dbxLoginBtn" title="Dropbox にログイン">Dropbox</button>
   <button class="header-btn" id="pickFolderBtn">フォルダを開く</button>
+</div>
+
+<!-- Link add modal -->
+<div class="modal" id="linkModal" style="display:none;">
+  <div class="modal-card">
+    <div class="modal-title">Dropbox 共有リンクを追加</div>
+    <p class="modal-hint">フォルダの共有リンクなら中身全部、ファイルの共有リンクなら1個だけ追加されます。</p>
+    <input type="text" id="linkInput" placeholder="https://www.dropbox.com/scl/fo/.../?rlkey=..." />
+    <div class="modal-actions">
+      <button class="header-btn ghost" id="linkCancelBtn">キャンセル</button>
+      <button class="header-btn" id="linkAddBtn">追加</button>
+    </div>
+  </div>
 </div>
 
 <div class="filterbar">
@@ -668,6 +785,10 @@ function escapeHtml(s) {
 }
 function cssEscape(s) { return String(s).replace(/["\\]/g, '\\$&'); }
 
+// ===== DROPBOX CONFIG =====
+const DROPBOX_APP_KEY = 'd2t8ociejyicnuh';
+const DROPBOX_REDIRECT = location.origin + location.pathname.replace(/[^/]*$/, '');
+
 // ===== STATE =====
 const state = {
   rootHandle: null,
@@ -682,7 +803,35 @@ const state = {
   audioPlayingPath: null,
   thumbCache: new Map(),
   currentObjectUrl: null,
+  columnOrder: [],      // ordered array of column IDs (dir.path or 'x:subPath')
+  extracted: new Set(), // sub-folder paths shown as independent columns
+  dbxToken: null,       // Dropbox access token
+  dbxRefresh: null,
+  source: 'local',      // 'local' | 'dropbox'
+  dbxLinks: [],         // shared link metadata { url, name, type, ... }
 };
+
+// ===== LAYOUT PERSISTENCE =====
+function layoutKey() { return 'dbcheck-layout:' + (state.rootName || ''); }
+function saveLayout() {
+  if (!state.rootName) return;
+  try {
+    localStorage.setItem(layoutKey(), JSON.stringify({
+      columnOrder: state.columnOrder,
+      extracted: Array.from(state.extracted),
+    }));
+  } catch {}
+}
+function loadLayout() {
+  if (!state.rootName) return;
+  try {
+    const raw = localStorage.getItem(layoutKey());
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    state.columnOrder = data.columnOrder || [];
+    state.extracted = new Set(data.extracted || []);
+  } catch {}
+}
 
 // ===== DOM =====
 const $ = id => document.getElementById(id);
@@ -706,7 +855,368 @@ const els = {
   segAll: $('seg-all'),
   viewThumb: $('viewThumb'),
   viewList: $('viewList'),
+  dbxLoginBtn: $('dbxLoginBtn'),
+  addLinkBtn: $('addLinkBtn'),
+  linkModal: $('linkModal'),
+  linkInput: $('linkInput'),
+  linkAddBtn: $('linkAddBtn'),
+  linkCancelBtn: $('linkCancelBtn'),
 };
+
+// ===== DROPBOX OAUTH (PKCE) =====
+function base64url(buffer) {
+  let str = '';
+  const bytes = new Uint8Array(buffer);
+  for (let i = 0; i < bytes.length; i++) str += String.fromCharCode(bytes[i]);
+  return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+async function generatePKCE() {
+  const arr = new Uint8Array(32);
+  crypto.getRandomValues(arr);
+  const verifier = base64url(arr);
+  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+  const challenge = base64url(hash);
+  return { verifier, challenge };
+}
+
+async function dbxLogin() {
+  const { verifier, challenge } = await generatePKCE();
+  sessionStorage.setItem('dbx_verifier', verifier);
+  const params = new URLSearchParams({
+    client_id: DROPBOX_APP_KEY,
+    response_type: 'code',
+    code_challenge: challenge,
+    code_challenge_method: 'S256',
+    redirect_uri: DROPBOX_REDIRECT,
+    token_access_type: 'offline',
+  });
+  location.href = 'https://www.dropbox.com/oauth2/authorize?' + params.toString();
+}
+
+async function checkOAuthCallback() {
+  const params = new URLSearchParams(location.search);
+  const code = params.get('code');
+  if (!code) {
+    // Restore saved token
+    const saved = localStorage.getItem('dbx_token');
+    const refresh = localStorage.getItem('dbx_refresh');
+    if (saved) {
+      state.dbxToken = saved;
+      state.dbxRefresh = refresh;
+      updateDbxBtnUI();
+    }
+    return;
+  }
+  const verifier = sessionStorage.getItem('dbx_verifier');
+  if (!verifier) {
+    history.replaceState({}, '', location.pathname);
+    return;
+  }
+  showLoading('Dropbox 認証中...');
+  try {
+    const res = await fetch('https://api.dropboxapi.com/oauth2/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code,
+        grant_type: 'authorization_code',
+        client_id: DROPBOX_APP_KEY,
+        code_verifier: verifier,
+        redirect_uri: DROPBOX_REDIRECT,
+      }),
+    });
+    const data = await res.json();
+    if (data.access_token) {
+      state.dbxToken = data.access_token;
+      state.dbxRefresh = data.refresh_token || null;
+      localStorage.setItem('dbx_token', data.access_token);
+      if (data.refresh_token) localStorage.setItem('dbx_refresh', data.refresh_token);
+      sessionStorage.removeItem('dbx_verifier');
+      history.replaceState({}, '', location.pathname);
+      updateDbxBtnUI();
+      // auto-load root
+      await dbxLoadRoot();
+    } else {
+      alert('Dropbox 認証エラー: ' + JSON.stringify(data));
+    }
+  } catch (e) {
+    alert('Dropbox 認証失敗: ' + e.message);
+  } finally {
+    hideLoading();
+  }
+}
+
+function updateDbxBtnUI() {
+  if (state.dbxToken) {
+    els.dbxLoginBtn.classList.add('connected');
+    els.dbxLoginBtn.textContent = '✓ Dropbox';
+    els.dbxLoginBtn.title = 'Dropbox接続中（クリックでログアウト）';
+  } else {
+    els.dbxLoginBtn.classList.remove('connected');
+    els.dbxLoginBtn.textContent = 'Dropbox';
+    els.dbxLoginBtn.title = 'Dropbox にログイン';
+  }
+}
+
+function dbxLogout() {
+  if (!confirm('Dropbox からログアウトしますか？')) return;
+  state.dbxToken = null;
+  state.dbxRefresh = null;
+  localStorage.removeItem('dbx_token');
+  localStorage.removeItem('dbx_refresh');
+  updateDbxBtnUI();
+}
+
+// ===== DROPBOX API =====
+async function dbxApi(endpoint, body) {
+  const res = await fetch('https://api.dropboxapi.com' + endpoint, {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer ' + state.dbxToken,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const txt = await res.text();
+    if (res.status === 401) {
+      alert('Dropbox トークン期限切れ。もう一度ログインしてください。');
+      dbxLogout();
+    }
+    throw new Error('Dropbox API: ' + txt);
+  }
+  return res.json();
+}
+
+async function dbxDownload(path) {
+  const res = await fetch('https://content.dropboxapi.com/2/files/download', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer ' + state.dbxToken,
+      'Dropbox-API-Arg': JSON.stringify({ path }),
+    },
+  });
+  if (!res.ok) throw new Error('Dropbox download: ' + await res.text());
+  return res.blob();
+}
+
+async function dbxGetSharedLinkFile(url, path) {
+  const arg = path ? { url, path } : { url };
+  const res = await fetch('https://content.dropboxapi.com/2/sharing/get_shared_link_file', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer ' + state.dbxToken,
+      'Dropbox-API-Arg': JSON.stringify(arg),
+    },
+  });
+  if (!res.ok) throw new Error('Dropbox shared link: ' + await res.text());
+  return res.blob();
+}
+
+async function dbxLoadRoot() {
+  if (!state.dbxToken) return;
+  showLoading('Dropbox 読み込み中...');
+  state.pathMap.clear();
+  state.thumbCache.clear();
+  try {
+    const root = { name: 'My Dropbox', path: '', kind: 'directory', children: [], dbxPath: '' };
+    state.pathMap.set('', root);
+    state.rootName = 'My Dropbox';
+    state.rootHandle = null;
+    state.source = 'dropbox';
+    els.appSub.textContent = 'My Dropbox';
+
+    let cursor = null, hasMore = true, total = 0;
+    while (hasMore) {
+      const result = cursor
+        ? await dbxApi('/2/files/list_folder/continue', { cursor })
+        : await dbxApi('/2/files/list_folder', { path: '', recursive: true, limit: 2000 });
+      for (const entry of result.entries) {
+        addDbxEntry(root, entry);
+        total++;
+      }
+      cursor = result.cursor;
+      hasMore = result.has_more;
+      if (hasMore) showLoading(`Dropbox 読み込み中 ${total}件...`);
+    }
+    sortTree(root);
+    state.rootChildren = root.children.filter(c => c.kind === 'directory');
+    state.audioQueue = buildAudioQueue(root);
+    let fileCount = 0;
+    function count(n) { for (const c of (n.children || [])) { if (c.kind === 'file') fileCount++; else count(c); } }
+    count(root);
+    els.statTag.innerHTML = `<strong>${fileCount}</strong> 件 (Dropbox)`;
+    state.filter = 'all';
+    els.segAll.classList.add('active');
+    els.segAudio.classList.remove('active');
+    state.columnOrder = [];
+    state.extracted = new Set();
+    loadLayout();
+    reconcileColumnOrder();
+    renderColumns();
+  } catch (e) {
+    alert('Dropbox 読み込みエラー: ' + e.message);
+  } finally {
+    hideLoading();
+  }
+}
+
+function addDbxEntry(root, entry) {
+  // entry.path_lower like '/01_音源/m01_op.wav'
+  // entry.path_display preserves case
+  const fullPath = (entry.path_display || entry.path_lower || '').replace(/^\//, '');
+  if (!fullPath) return;
+  const parts = fullPath.split('/');
+  const name = parts[parts.length - 1];
+  // ensure all parent dirs exist
+  let parent = root;
+  let curPath = '';
+  for (let i = 0; i < parts.length - 1; i++) {
+    curPath = curPath ? curPath + '/' + parts[i] : parts[i];
+    let next = state.pathMap.get(curPath);
+    if (!next) {
+      next = { name: parts[i], path: curPath, kind: 'directory', children: [], parent, dbxPath: '/' + curPath };
+      state.pathMap.set(curPath, next);
+      parent.children.push(next);
+    }
+    parent = next;
+  }
+  if (entry['.tag'] === 'folder') {
+    if (!state.pathMap.has(fullPath)) {
+      const dir = { name, path: fullPath, kind: 'directory', children: [], parent, dbxPath: '/' + fullPath };
+      state.pathMap.set(fullPath, dir);
+      parent.children.push(dir);
+    }
+  } else if (entry['.tag'] === 'file') {
+    const f = {
+      name, path: fullPath, kind: 'file',
+      type: classify(name),
+      size: entry.size || 0,
+      dur: 0,
+      dbxPath: '/' + fullPath,
+      parent,
+    };
+    state.pathMap.set(fullPath, f);
+    parent.children.push(f);
+  }
+}
+
+// ===== UNIFIED FILE BLOB ACCESSOR =====
+async function getFileBlob(item) {
+  if (item.handle) return await item.handle.getFile();
+  if (item.dbxLinkUrl && item.dbxLinkPath !== undefined) return await dbxGetSharedLinkFile(item.dbxLinkUrl, item.dbxLinkPath);
+  if (item.dbxLinkUrl) return await dbxGetSharedLinkFile(item.dbxLinkUrl);
+  if (item.dbxPath) return await dbxDownload(item.dbxPath);
+  throw new Error('ファイルにアクセスできません');
+}
+
+// ===== SHARED LINK ADD =====
+async function addSharedLink(url) {
+  if (!state.dbxToken) {
+    alert('まず Dropbox にログインしてください');
+    return;
+  }
+  url = url.trim();
+  if (!url.startsWith('https://www.dropbox.com/') && !url.startsWith('https://dropbox.com/')) {
+    alert('Dropbox の共有リンクを貼ってください');
+    return;
+  }
+  showLoading('共有リンクを解析中...');
+  try {
+    const meta = await dbxApi('/2/sharing/get_shared_link_metadata', { url });
+    if (meta['.tag'] === 'folder') {
+      // フォルダ共有リンク → 中身一覧
+      let cursor = null, hasMore = true;
+      const entries = [];
+      while (hasMore) {
+        const result = cursor
+          ? await dbxApi('/2/sharing/list_shared_link_files/continue', { cursor })
+          : await dbxApi('/2/sharing/list_shared_link_files', { shared_link: { url } });
+        entries.push(...(result.entries || []));
+        cursor = result.cursor;
+        hasMore = result.has_more;
+      }
+      // root に折りたたんで追加
+      if (!state.rootHandle && state.source !== 'dropbox') {
+        // 初回: ルートを「リンク集」として作る
+        state.rootName = 'Shared Links';
+        state.source = 'dropbox';
+        els.appSub.textContent = 'Shared Links';
+        const root = { name: 'Shared Links', path: '', kind: 'directory', children: [] };
+        state.pathMap.set('', root);
+      }
+      const root = state.pathMap.get('');
+      // フォルダノード作成
+      const folderName = meta.name + ' (共有)';
+      const folderPath = folderName;
+      let folderNode = state.pathMap.get(folderPath);
+      if (!folderNode) {
+        folderNode = { name: folderName, path: folderPath, kind: 'directory', children: [], parent: root };
+        state.pathMap.set(folderPath, folderNode);
+        root.children.push(folderNode);
+      }
+      // 各ファイル追加
+      for (const entry of entries) {
+        if (entry['.tag'] !== 'file') continue;
+        const childPath = folderPath + '/' + entry.name;
+        if (state.pathMap.has(childPath)) continue;
+        const f = {
+          name: entry.name, path: childPath, kind: 'file',
+          type: classify(entry.name),
+          size: entry.size || 0,
+          dur: 0,
+          dbxLinkUrl: url,
+          dbxLinkPath: '/' + entry.name,
+          parent: folderNode,
+        };
+        state.pathMap.set(childPath, f);
+        folderNode.children.push(f);
+      }
+      sortTree(folderNode);
+      state.rootChildren = root.children.filter(c => c.kind === 'directory');
+      state.audioQueue = buildAudioQueue(root);
+      reconcileColumnOrder();
+      renderColumns();
+    } else if (meta['.tag'] === 'file') {
+      // 個別ファイル共有リンク
+      if (!state.pathMap.get('')) {
+        state.rootName = 'Shared Links';
+        state.source = 'dropbox';
+        els.appSub.textContent = 'Shared Links';
+        const root = { name: 'Shared Links', path: '', kind: 'directory', children: [] };
+        state.pathMap.set('', root);
+      }
+      const root = state.pathMap.get('');
+      let folderNode = state.pathMap.get('共有リンク');
+      if (!folderNode) {
+        folderNode = { name: '共有リンク', path: '共有リンク', kind: 'directory', children: [], parent: root };
+        state.pathMap.set('共有リンク', folderNode);
+        root.children.push(folderNode);
+      }
+      const childPath = '共有リンク/' + meta.name;
+      if (!state.pathMap.has(childPath)) {
+        const f = {
+          name: meta.name, path: childPath, kind: 'file',
+          type: classify(meta.name),
+          size: meta.size || 0, dur: 0,
+          dbxLinkUrl: url,
+          parent: folderNode,
+        };
+        state.pathMap.set(childPath, f);
+        folderNode.children.push(f);
+      }
+      sortTree(folderNode);
+      state.rootChildren = root.children.filter(c => c.kind === 'directory');
+      state.audioQueue = buildAudioQueue(root);
+      reconcileColumnOrder();
+      renderColumns();
+    }
+  } catch (e) {
+    alert('リンク追加エラー: ' + e.message);
+  } finally {
+    hideLoading();
+  }
+}
 
 // ===== FOLDER PICKER =====
 els.pickBtn.addEventListener('click', async () => {
@@ -751,10 +1261,106 @@ async function scanFolder() {
     state.filter = 'all';
     els.segAll.classList.add('active');
     els.segAudio.classList.remove('active');
+    // load saved layout, then reconcile with current folders
+    loadLayout();
+    reconcileColumnOrder();
     renderColumns();
   } finally {
     hideLoading();
   }
+}
+
+function reconcileColumnOrder() {
+  // Compute the set of valid column IDs (root subdirs + extracted)
+  const valid = new Set();
+  for (const dir of state.rootChildren) valid.add(dir.path);
+  // remove extracted that no longer exist
+  const newExtracted = new Set();
+  for (const ex of state.extracted) {
+    if (state.pathMap.has(ex)) {
+      newExtracted.add(ex);
+      valid.add('x:' + ex);
+    }
+  }
+  state.extracted = newExtracted;
+  // remove invalid IDs from columnOrder
+  state.columnOrder = state.columnOrder.filter(id => valid.has(id));
+  // append missing IDs at end
+  for (const dir of state.rootChildren) {
+    if (!state.columnOrder.includes(dir.path)) state.columnOrder.push(dir.path);
+  }
+  for (const ex of state.extracted) {
+    const id = 'x:' + ex;
+    if (!state.columnOrder.includes(id)) state.columnOrder.push(id);
+  }
+}
+
+function moveColumn(srcId, tgtId, before) {
+  const srcIdx = state.columnOrder.indexOf(srcId);
+  if (srcIdx === -1) return;
+  state.columnOrder.splice(srcIdx, 1);
+  let tgtIdx = state.columnOrder.indexOf(tgtId);
+  if (tgtIdx === -1) tgtIdx = state.columnOrder.length;
+  if (!before) tgtIdx++;
+  state.columnOrder.splice(tgtIdx, 0, srcId);
+  saveLayout();
+  renderColumns();
+}
+
+function extractSubfolder(subPath) {
+  if (state.extracted.has(subPath)) return;
+  state.extracted.add(subPath);
+  state.columnOrder.push('x:' + subPath);
+  saveLayout();
+  renderColumns();
+}
+
+function mergeBackSubfolder(subPath) {
+  state.extracted.delete(subPath);
+  state.columnOrder = state.columnOrder.filter(id => id !== 'x:' + subPath);
+  saveLayout();
+  renderColumns();
+}
+
+let dragSourceId = null;
+function setupColumnDrag(colEl, columnId) {
+  colEl.draggable = true;
+  colEl.dataset.colId = columnId;
+  colEl.addEventListener('dragstart', e => {
+    dragSourceId = columnId;
+    colEl.classList.add('dragging');
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', columnId);
+    }
+  });
+  colEl.addEventListener('dragend', () => {
+    colEl.classList.remove('dragging');
+    document.querySelectorAll('.column.drag-over-left, .column.drag-over-right').forEach(el => {
+      el.classList.remove('drag-over-left', 'drag-over-right');
+    });
+    dragSourceId = null;
+  });
+  colEl.addEventListener('dragover', e => {
+    if (!dragSourceId || dragSourceId === columnId) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    const rect = colEl.getBoundingClientRect();
+    const isLeft = (e.clientX - rect.left) < rect.width / 2;
+    colEl.classList.toggle('drag-over-left', isLeft);
+    colEl.classList.toggle('drag-over-right', !isLeft);
+  });
+  colEl.addEventListener('dragleave', () => {
+    colEl.classList.remove('drag-over-left', 'drag-over-right');
+  });
+  colEl.addEventListener('drop', e => {
+    e.preventDefault();
+    colEl.classList.remove('drag-over-left', 'drag-over-right');
+    if (!dragSourceId || dragSourceId === columnId) return;
+    const rect = colEl.getBoundingClientRect();
+    const isLeft = (e.clientX - rect.left) < rect.width / 2;
+    moveColumn(dragSourceId, columnId, isLeft);
+  });
 }
 
 async function walk(dirHandle, basePath, parent) {
@@ -798,21 +1404,27 @@ function buildAudioQueue(root) {
   return q;
 }
 
-function collectFlatGrouped(dir) {
-  const groups = new Map();
-  function walk(node, subPath) {
+function collectFlatGrouped(dir, excludePaths) {
+  const groups = [];
+  // Each group: { sub: 'displayPath', subPath: 'actualPath', files: [...] }
+  function walk(node, subDisplay, subRealPath) {
+    // skip if this directory itself is extracted
+    if (excludePaths && subRealPath && excludePaths.has(subRealPath)) return;
+    const directFiles = [];
     for (const c of (node.children || [])) {
       if (c.kind === 'directory') {
-        const newPath = subPath ? `${subPath} / ${c.name}` : c.name;
-        walk(c, newPath);
+        const newDisplay = subDisplay ? `${subDisplay} / ${c.name}` : c.name;
+        walk(c, newDisplay, c.path);
       } else {
-        if (!groups.has(subPath)) groups.set(subPath, []);
-        groups.get(subPath).push(c);
+        directFiles.push(c);
       }
     }
+    if (directFiles.length > 0) {
+      groups.push({ sub: subDisplay, subPath: subRealPath || '', files: directFiles });
+    }
   }
-  walk(dir, '');
-  return [...groups.entries()].map(([k, v]) => ({ sub: k, files: v }));
+  walk(dir, '', '');
+  return groups;
 }
 
 // ===== RENDER =====
@@ -859,67 +1471,115 @@ function renderColumns() {
   `;
   projBody.appendChild(card);
 
-  // FOLDER columns
-  if (state.rootChildren.length === 0) {
-    const col = document.createElement('div');
-    col.className = 'column';
-    col.innerHTML = `
-      <div class="col-header">
-        <span class="col-title">直下</span>
-        <span class="col-count">${(state.pathMap.get('').children || []).filter(c => c.kind === 'file').length}</span>
-      </div>
-      <div class="col-body"></div>
-    `;
-    const body = col.querySelector('.col-body');
-    let files = (state.pathMap.get('').children || []).filter(c => c.kind === 'file');
-    if (state.filter === 'audio') files = files.filter(f => f.type === 'audio');
-    if (files.length === 0) {
-      body.innerHTML = '<div class="group-header" style="justify-content:center;color:var(--text-3);padding:20px 8px;">該当ファイルなし</div>';
-    } else {
-      for (const f of files) body.appendChild(createCard(f));
-    }
-    els.columns.appendChild(col);
-  } else {
-    for (const dir of state.rootChildren) {
-      const groups = collectFlatGrouped(dir);
-      let totalCount = 0;
-      for (const g of groups) totalCount += g.files.length;
+  // FOLDER columns based on columnOrder
+  if (state.columnOrder.length === 0) {
+    // root has no subdirs: show files directly
+    const rootFiles = (state.pathMap.get('').children || []).filter(c => c.kind === 'file');
+    if (rootFiles.length > 0) {
       const col = document.createElement('div');
       col.className = 'column';
       col.innerHTML = `
         <div class="col-header">
-          <span class="col-title">${escapeHtml(dir.name)}</span>
-          <span class="col-count">${totalCount}</span>
-          <button class="col-dl-btn" data-dir-path="${escapeHtml(dir.path)}" title="このフォルダを ZIP でダウンロード"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12m0 0l-5-5m5 5l5-5"/><path d="M4 21h16"/></svg></button>
+          <span class="col-title">直下</span>
+          <span class="col-count">${rootFiles.length}</span>
         </div>
         <div class="col-body"></div>
       `;
-      const dlBtn = col.querySelector('.col-dl-btn');
-      dlBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        downloadFolder(dir, dlBtn);
-      });
       const body = col.querySelector('.col-body');
-      for (const g of groups) {
-        let files = g.files;
-        if (state.filter === 'audio') files = files.filter(f => f.type === 'audio');
-        if (files.length === 0) continue;
-        if (g.sub) {
-          const head = document.createElement('div');
-          head.className = 'group-header';
-          head.innerHTML = `${escapeHtml(g.sub)}<span class="group-count">${files.length}件</span>`;
-          body.appendChild(head);
-        }
-        for (const f of files) body.appendChild(createCard(f));
-      }
-      if (body.children.length === 0) {
-        body.innerHTML = '<div class="group-header" style="justify-content:center;color:var(--text-3);padding:20px 8px;">該当なし</div>';
-      }
+      let files = rootFiles;
+      if (state.filter === 'audio') files = files.filter(f => f.type === 'audio');
+      for (const f of files) body.appendChild(createCard(f));
       els.columns.appendChild(col);
+    }
+  } else {
+    for (const colId of state.columnOrder) {
+      const colEl = renderColumnById(colId);
+      if (colEl) els.columns.appendChild(colEl);
     }
   }
   loadImageThumbs();
   loadVideoThumbs();
+}
+
+function renderColumnById(colId) {
+  let dir, isExtracted = false;
+  if (colId.startsWith('x:')) {
+    dir = state.pathMap.get(colId.substring(2));
+    isExtracted = true;
+  } else {
+    dir = state.pathMap.get(colId);
+  }
+  if (!dir || dir.kind !== 'directory') return null;
+
+  // For root-level columns, exclude extracted subdirs
+  // For extracted columns, exclude further-extracted subdirs (within this subtree)
+  const excludeForThis = isExtracted
+    ? new Set(Array.from(state.extracted).filter(p => p !== dir.path && p.startsWith(dir.path + '/')))
+    : new Set(Array.from(state.extracted).filter(p => p.startsWith(dir.path + '/') || p === dir.path));
+
+  const groups = collectFlatGrouped(dir, excludeForThis);
+  let totalCount = 0;
+  for (const g of groups) totalCount += g.files.length;
+
+  const col = document.createElement('div');
+  col.className = 'column' + (isExtracted ? ' col-extracted' : '');
+
+  const mergeBtnHtml = isExtracted
+    ? `<button class="col-merge-btn" title="親フォルダに戻す">↙ 戻す</button>`
+    : '';
+
+  col.innerHTML = `
+    <div class="col-header">
+      <span class="col-handle" title="ドラッグで並び替え">⋮⋮</span>
+      <span class="col-title">${escapeHtml(dir.name)}</span>
+      <span class="col-count">${totalCount}</span>
+      ${mergeBtnHtml}
+      <button class="col-dl-btn" title="このフォルダを ZIP でダウンロード"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12m0 0l-5-5m5 5l5-5"/><path d="M4 21h16"/></svg></button>
+    </div>
+    <div class="col-body"></div>
+  `;
+
+  const dlBtn = col.querySelector('.col-dl-btn');
+  dlBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    downloadFolder(dir, dlBtn);
+  });
+  if (isExtracted) {
+    const mergeBtn = col.querySelector('.col-merge-btn');
+    mergeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      mergeBackSubfolder(dir.path);
+    });
+  }
+
+  setupColumnDrag(col, colId);
+
+  const body = col.querySelector('.col-body');
+  for (const g of groups) {
+    let files = g.files;
+    if (state.filter === 'audio') files = files.filter(f => f.type === 'audio');
+    if (files.length === 0) continue;
+    if (g.sub) {
+      const head = document.createElement('div');
+      head.className = 'group-header';
+      // 「↗」ボタン: このサブフォルダを独立カラムに切り出す
+      const canExtract = !!g.subPath && !state.extracted.has(g.subPath);
+      head.innerHTML = `${escapeHtml(g.sub)}<span class="group-count">${files.length}件</span>${canExtract ? `<button class="group-action" data-extract="${escapeHtml(g.subPath)}" title="このサブフォルダを別カラムに">↗</button>` : ''}`;
+      if (canExtract) {
+        head.querySelector('.group-action').addEventListener('click', (e) => {
+          e.stopPropagation();
+          extractSubfolder(g.subPath);
+        });
+      }
+      body.appendChild(head);
+    }
+    for (const f of files) body.appendChild(createCard(f));
+  }
+  if (body.children.length === 0) {
+    body.innerHTML = '<div class="group-header" style="justify-content:center;color:var(--text-3);padding:20px 8px;">該当なし</div>';
+  }
+
+  return col;
 }
 
 function countAll(node) {
@@ -1004,7 +1664,7 @@ function createCard(file) {
 
 async function downloadFile(file) {
   try {
-    const f = await file.handle.getFile();
+    const f = await getFileBlob(file);
     const url = URL.createObjectURL(f);
     const a = document.createElement('a');
     a.href = url;
@@ -1027,10 +1687,12 @@ async function loadImageThumbs() {
     const path = cardEl.dataset.path;
     const item = state.pathMap.get(path);
     if (!item || item.type !== 'image') continue;
+    // Skip remote thumbs (would download whole file just for thumb)
+    if (!item.handle) continue;
     try {
       let url = state.thumbCache.get(path);
       if (!url) {
-        const file = await item.handle.getFile();
+        const file = await getFileBlob(item);
         url = URL.createObjectURL(file);
         state.thumbCache.set(path, url);
       }
@@ -1047,10 +1709,12 @@ async function loadVideoThumbs() {
     const path = cardEl.dataset.path;
     const item = state.pathMap.get(path);
     if (!item || item.type !== 'video') continue;
+    // Skip remote thumbs (large download cost)
+    if (!item.handle) continue;
     try {
       let url = state.thumbCache.get(path);
       if (!url) {
-        const file = await item.handle.getFile();
+        const file = await getFileBlob(item);
         url = URL.createObjectURL(file);
         state.thumbCache.set(path, url);
       }
@@ -1070,10 +1734,9 @@ function onCardClick(file) {
 
 async function onCardDblClick(file) {
   // ダブルクリック = ダウンロード起動（音源以外）
-  // ダウンロード後、ブラウザのダウンロードバーから Mac のデフォルトアプリで開ける
   if (file.type === 'audio') return;
   try {
-    const f = await file.handle.getFile();
+    const f = await getFileBlob(file);
     const url = URL.createObjectURL(f);
     const a = document.createElement('a');
     a.href = url;
@@ -1108,7 +1771,7 @@ async function downloadFolder(dir, btn) {
           await addFiles(c, sub);
         } else if (c.kind === 'file') {
           try {
-            const f = await c.handle.getFile();
+            const f = await getFileBlob(c);
             zipFolder.file(c.name, f);
             fileCount++;
             if (fileCount % 5 === 0) showLoading(`「${dir.name}」を ZIP 化中... (${fileCount}件)`);
@@ -1147,7 +1810,7 @@ async function downloadFolder(dir, btn) {
 // ===== AUDIO =====
 async function playAudioFile(item) {
   try {
-    const f = await item.handle.getFile();
+    const f = await getFileBlob(item);
     if (state.currentObjectUrl) URL.revokeObjectURL(state.currentObjectUrl);
     const url = URL.createObjectURL(f);
     state.currentObjectUrl = url;
@@ -1243,6 +1906,38 @@ els.viewList.addEventListener('click', () => {
   renderColumns();
 });
 
+// ===== DROPBOX BUTTONS =====
+els.dbxLoginBtn.addEventListener('click', () => {
+  if (state.dbxToken) {
+    if (confirm('Dropbox からログアウトしますか？\n（再ログインすればまたアクセスできます）')) {
+      dbxLogout();
+    }
+  } else {
+    dbxLogin();
+  }
+});
+els.addLinkBtn.addEventListener('click', () => {
+  els.linkInput.value = '';
+  els.linkModal.style.display = 'flex';
+  els.linkInput.focus();
+});
+els.linkCancelBtn.addEventListener('click', () => {
+  els.linkModal.style.display = 'none';
+});
+els.linkAddBtn.addEventListener('click', async () => {
+  const url = els.linkInput.value.trim();
+  if (!url) return;
+  els.linkModal.style.display = 'none';
+  await addSharedLink(url);
+});
+els.linkInput.addEventListener('keydown', (e) => {
+  if (e.code === 'Enter') els.linkAddBtn.click();
+  else if (e.code === 'Escape') els.linkCancelBtn.click();
+});
+els.linkModal.addEventListener('click', (e) => {
+  if (e.target === els.linkModal) els.linkModal.style.display = 'none';
+});
+
 // ===== KEYBOARD =====
 document.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
@@ -1275,6 +1970,9 @@ function hideLoading() {
   const el = document.getElementById('loadingOverlay');
   if (el) el.remove();
 }
+
+// ===== INIT =====
+checkOAuthCallback();
 </script>
 
 </body>
