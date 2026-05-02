@@ -349,6 +349,65 @@
   .col-dl-btn:disabled { opacity: 0.5; cursor: wait; }
   .col-dl-btn svg { width: 12px; height: 12px; }
 
+  /* column collapse */
+  .col-collapse-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-3);
+    width: 22px; height: 22px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    padding: 0;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+    font-family: inherit;
+  }
+  .col-collapse-btn:hover { color: var(--accent); border-color: var(--accent); }
+  .column.collapsed {
+    width: 38px !important;
+    padding: 0;
+    cursor: pointer;
+    background: var(--bg-2);
+  }
+  .column.collapsed:hover { background: var(--surface); }
+  .column.collapsed > * { display: none; }
+  .column.collapsed .col-collapsed-label {
+    display: flex !important;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    padding: 14px 0 12px;
+    gap: 10px;
+    height: 100%;
+  }
+  .col-collapsed-label { display: none; }
+  .col-collapsed-label .lab {
+    color: var(--text-2);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    writing-mode: vertical-rl;
+    text-orientation: mixed;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-height: 100%;
+  }
+  .col-collapsed-label .cnt {
+    color: var(--text-3);
+    font-size: 10px;
+    font-feature-settings: "tnum";
+  }
+  .col-collapsed-label .ico {
+    color: var(--text-3);
+    font-size: 12px;
+    transform: rotate(180deg);
+  }
+
   /* drag handle on column header */
   .col-handle {
     color: var(--text-3);
@@ -521,12 +580,30 @@
     overflow: hidden;
     background: transparent;
     border: 1px solid transparent;
-    transition: background .12s;
+    transition: background .12s, border-color .12s, box-shadow .12s;
     position: relative;
   }
   .card:hover { background: var(--surface-hover); border-color: var(--border); }
-  .card.active { background: var(--surface-hover); border-color: var(--border-strong); }
-  .card.playing { background: var(--surface-hover); border-color: var(--accent); }
+  .card.active {
+    background: var(--surface-hover);
+    border-color: var(--border-strong);
+  }
+  .card.playing {
+    background: rgba(212,146,90,0.08);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
+  }
+  .card.playing .card-title {
+    color: var(--accent) !important;
+  }
+  .card.playing::before {
+    content: '';
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 3px;
+    background: var(--accent);
+    z-index: 3;
+  }
 
   .thumb {
     aspect-ratio: 1.7 / 1;
@@ -958,6 +1035,7 @@ const state = {
   currentObjectUrl: null,
   columnOrder: [],      // ordered array of column IDs (dir.path or 'x:subPath')
   extracted: new Set(), // sub-folder paths shown as independent columns
+  collapsed: new Set(), // column IDs that are collapsed (folded)
   dbxToken: null,       // Dropbox access token
   dbxRefresh: null,
   source: 'local',      // 'local' | 'dropbox'
@@ -972,6 +1050,7 @@ function saveLayout() {
     localStorage.setItem(layoutKey(), JSON.stringify({
       columnOrder: state.columnOrder,
       extracted: Array.from(state.extracted),
+      collapsed: Array.from(state.collapsed),
     }));
   } catch {}
 }
@@ -983,6 +1062,7 @@ function loadLayout() {
     const data = JSON.parse(raw);
     state.columnOrder = data.columnOrder || [];
     state.extracted = new Set(data.extracted || []);
+    state.collapsed = new Set(data.collapsed || []);
   } catch {}
 }
 
@@ -1542,6 +1622,13 @@ function extractAndPlaceAt(subPath, targetColId, before) {
   moveColumn(xId, targetColId, before);
 }
 
+function toggleCollapseColumn(colId) {
+  if (state.collapsed.has(colId)) state.collapsed.delete(colId);
+  else state.collapsed.add(colId);
+  saveLayout();
+  renderColumns();
+}
+
 function mergeBackSubfolder(subPath) {
   state.extracted.delete(subPath);
   state.columnOrder = state.columnOrder.filter(id => id !== 'x:' + subPath);
@@ -1778,7 +1865,9 @@ function renderColumnById(colId) {
   for (const g of groups) totalCount += g.files.length;
 
   const col = document.createElement('div');
-  col.className = 'column' + (isExtracted ? ' col-extracted' : '');
+  const isCollapsed = state.collapsed.has(colId);
+  col.className = 'column' + (isExtracted ? ' col-extracted' : '') + (isCollapsed ? ' collapsed' : '');
+  col.dataset.colId = colId;
 
   const mergeBtnHtml = isExtracted
     ? `<button class="col-merge-btn" title="親フォルダに戻す">↙ 戻す</button>`
@@ -1789,16 +1878,32 @@ function renderColumnById(colId) {
       <span class="col-handle" title="ドラッグで並び替え">⋮⋮</span>
       <span class="col-title">${escapeHtml(dir.name)}</span>
       <span class="col-count">${totalCount}</span>
+      <button class="col-collapse-btn" title="折りたたむ">−</button>
       ${mergeBtnHtml}
       <button class="col-dl-btn" title="このフォルダを ZIP でダウンロード"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12m0 0l-5-5m5 5l5-5"/><path d="M4 21h16"/></svg></button>
     </div>
     <div class="col-body"></div>
+    <div class="col-collapsed-label">
+      <span class="ico">−</span>
+      <span class="lab">${escapeHtml(dir.name)}</span>
+      <span class="cnt">${totalCount}</span>
+    </div>
   `;
+
+  if (isCollapsed) {
+    col.addEventListener('click', () => toggleCollapseColumn(colId));
+    return col; // body 構築不要
+  }
 
   const dlBtn = col.querySelector('.col-dl-btn');
   dlBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     downloadFolder(dir, dlBtn);
+  });
+  const collapseBtn = col.querySelector('.col-collapse-btn');
+  collapseBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleCollapseColumn(colId);
   });
   if (isExtracted) {
     const mergeBtn = col.querySelector('.col-merge-btn');
@@ -2081,9 +2186,10 @@ function selectNeighborFile(direction) {
   idx = (idx + direction + files.length) % files.length;
   const file = files[idx];
   state.selectedPath = file.path;
-  // 矢印キー移動時: 音源だけ自動再生。動画/画像/PDFはモーダル自動オープンせず、選択ハイライトのみ。
+  // 矢印キー移動時: 音源は「現在再生中なら継続再生」「一時停止中ならロードのみ」
   if (file.type === 'audio') {
-    playAudioFile(file);
+    const wasPlaying = els.audio.src && !els.audio.paused;
+    playAudioFile(file, { autoPlay: wasPlaying });
   }
   renderColumns();
   setTimeout(() => {
@@ -2168,7 +2274,17 @@ async function downloadFolder(dir, btn) {
 }
 
 // ===== AUDIO =====
-async function playAudioFile(item) {
+async function playAudioFile(item, opts = {}) {
+  // opts.autoPlay: true で再生開始、false でロードのみ。デフォルトは true
+  const autoPlay = opts.autoPlay !== false;
+  // 同じ曲なら toggle（再生/停止）
+  if (state.audioPlayingPath === item.path && els.audio.src) {
+    if (autoPlay) {
+      if (els.audio.paused) els.audio.play().catch(() => {});
+      else els.audio.pause();
+    }
+    return;
+  }
   try {
     const f = await getFileBlob(item);
     if (state.currentObjectUrl) URL.revokeObjectURL(state.currentObjectUrl);
@@ -2180,9 +2296,15 @@ async function playAudioFile(item) {
     els.playerTitle.textContent = item.name;
     state.audioPlayingPath = item.path;
     state.audioIndex = state.audioQueue.findIndex(a => a.path === item.path);
-    await els.audio.play().catch(() => {});
+    if (autoPlay) {
+      await els.audio.play().catch((err) => {
+        // 自動再生がブロックされた場合（初回ユーザー操作前など）
+        console.warn('autoplay blocked:', err);
+      });
+    }
   } catch (e) {
     console.error(e);
+    alert('再生エラー: ' + e.message);
   }
 }
 
