@@ -181,17 +181,17 @@
     min-height: 0;
   }
   .column {
-    width: 240px;
+    width: 210px;
     flex-shrink: 0;
     display: flex;
     flex-direction: column;
     border-right: 1px solid var(--border-2);
-    padding: 0 8px;
+    padding: 0 6px;
     overflow: hidden;
   }
   .column:last-child { border-right: none; }
-  .column.proj { width: 220px; }
-  .columns.list-mode .column:not(.proj) { width: 340px; }
+  .column.proj { width: 190px; }
+  .columns.list-mode .column:not(.proj) { width: 280px; }
 
   .col-header {
     display: flex; align-items: baseline;
@@ -251,6 +251,21 @@
     font-size: 10px;
     margin-right: 2px;
   }
+  /* group drag handle */
+  .group-handle {
+    cursor: grab;
+    color: var(--text-3);
+    font-size: 10px;
+    letter-spacing: -1px;
+    user-select: none;
+    margin-right: 4px;
+    padding: 2px 3px;
+    border-radius: 3px;
+    line-height: 1;
+  }
+  .group-handle:hover { color: var(--accent); }
+  .group-handle:active { cursor: grabbing; }
+
   /* group extract button */
   .group-action {
     background: transparent;
@@ -1125,13 +1140,18 @@ async function addSharedLink(url) {
   try {
     const meta = await dbxApi('/2/sharing/get_shared_link_metadata', { url });
     if (meta['.tag'] === 'folder') {
-      // フォルダ共有リンク → 中身一覧
+      // フォルダ共有リンク → /2/files/list_folder に shared_link を渡す
       let cursor = null, hasMore = true;
       const entries = [];
       while (hasMore) {
         const result = cursor
-          ? await dbxApi('/2/sharing/list_shared_link_files/continue', { cursor })
-          : await dbxApi('/2/sharing/list_shared_link_files', { shared_link: { url } });
+          ? await dbxApi('/2/files/list_folder/continue', { cursor })
+          : await dbxApi('/2/files/list_folder', {
+              path: '',
+              shared_link: { url },
+              recursive: true,
+              limit: 2000,
+            });
         entries.push(...(result.entries || []));
         cursor = result.cursor;
         hasMore = result.has_more;
@@ -1155,22 +1175,47 @@ async function addSharedLink(url) {
         state.pathMap.set(folderPath, folderNode);
         root.children.push(folderNode);
       }
-      // 各ファイル追加
+      // 各エントリ追加（再帰的にフォルダ階層を構築）
       for (const entry of entries) {
-        if (entry['.tag'] !== 'file') continue;
-        const childPath = folderPath + '/' + entry.name;
-        if (state.pathMap.has(childPath)) continue;
-        const f = {
-          name: entry.name, path: childPath, kind: 'file',
-          type: classify(entry.name),
-          size: entry.size || 0,
-          dur: 0,
-          dbxLinkUrl: url,
-          dbxLinkPath: '/' + entry.name,
-          parent: folderNode,
-        };
-        state.pathMap.set(childPath, f);
-        folderNode.children.push(f);
+        const relPath = (entry.path_display || entry.path_lower || '').replace(/^\//, '');
+        if (!relPath) continue;
+        const parts = relPath.split('/');
+        const name = parts[parts.length - 1];
+        // 親フォルダを順に作る
+        let parent = folderNode;
+        let curPath = folderPath;
+        for (let i = 0; i < parts.length - 1; i++) {
+          curPath = curPath + '/' + parts[i];
+          let next = state.pathMap.get(curPath);
+          if (!next) {
+            next = { name: parts[i], path: curPath, kind: 'directory', children: [], parent };
+            state.pathMap.set(curPath, next);
+            parent.children.push(next);
+          }
+          parent = next;
+        }
+        const childPath = curPath + '/' + name;
+        if (entry['.tag'] === 'folder') {
+          if (!state.pathMap.has(childPath)) {
+            const dir = { name, path: childPath, kind: 'directory', children: [], parent };
+            state.pathMap.set(childPath, dir);
+            parent.children.push(dir);
+          }
+        } else if (entry['.tag'] === 'file') {
+          if (!state.pathMap.has(childPath)) {
+            const f = {
+              name, path: childPath, kind: 'file',
+              type: classify(name),
+              size: entry.size || 0,
+              dur: 0,
+              dbxLinkUrl: url,
+              dbxLinkPath: '/' + relPath,
+              parent,
+            };
+            state.pathMap.set(childPath, f);
+            parent.children.push(f);
+          }
+        }
       }
       sortTree(folderNode);
       state.rootChildren = root.children.filter(c => c.kind === 'directory');
@@ -1315,6 +1360,15 @@ function extractSubfolder(subPath) {
   renderColumns();
 }
 
+function extractAndPlaceAt(subPath, targetColId, before) {
+  const xId = 'x:' + subPath;
+  if (!state.extracted.has(subPath)) {
+    state.extracted.add(subPath);
+    state.columnOrder.push(xId);
+  }
+  moveColumn(xId, targetColId, before);
+}
+
 function mergeBackSubfolder(subPath) {
   state.extracted.delete(subPath);
   state.columnOrder = state.columnOrder.filter(id => id !== 'x:' + subPath);
@@ -1363,7 +1417,32 @@ function setupColumnDrag(colEl, columnId) {
     if (!dragSourceId || dragSourceId === columnId) return;
     const rect = colEl.getBoundingClientRect();
     const isLeft = (e.clientX - rect.left) < rect.width / 2;
-    moveColumn(dragSourceId, columnId, isLeft);
+    if (dragSourceId.startsWith('sub:')) {
+      const subPath = dragSourceId.substring(4);
+      extractAndPlaceAt(subPath, columnId, isLeft);
+    } else {
+      moveColumn(dragSourceId, columnId, isLeft);
+    }
+  });
+}
+
+function setupGroupDrag(headerEl, subPath) {
+  const handle = headerEl.querySelector('.group-handle');
+  if (!handle || !subPath) return;
+  handle.draggable = true;
+  handle.addEventListener('dragstart', e => {
+    dragSourceId = 'sub:' + subPath;
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', dragSourceId);
+    }
+    e.stopPropagation();
+  });
+  handle.addEventListener('dragend', () => {
+    document.querySelectorAll('.column.drag-over-left, .column.drag-over-right').forEach(el => {
+      el.classList.remove('drag-over-left', 'drag-over-right');
+    });
+    dragSourceId = null;
   });
 }
 
@@ -1566,15 +1645,17 @@ function renderColumnById(colId) {
     if (g.sub) {
       const head = document.createElement('div');
       head.className = 'group-header';
-      // 「↗」ボタン: このサブフォルダを独立カラムに切り出す
       const canExtract = !!g.subPath && !state.extracted.has(g.subPath);
-      head.innerHTML = `${escapeHtml(g.sub)}<span class="group-count">${files.length}件</span>${canExtract ? `<button class="group-action" data-extract="${escapeHtml(g.subPath)}" title="このサブフォルダを別カラムに">↗</button>` : ''}`;
+      const dragHandleHtml = g.subPath ? `<span class="group-handle" title="ドラッグで任意の位置に移動">⋮⋮</span>` : '';
+      const extractBtnHtml = canExtract ? `<button class="group-action" data-extract="${escapeHtml(g.subPath)}" title="このサブフォルダを別カラムに">↗</button>` : '';
+      head.innerHTML = `${dragHandleHtml}${escapeHtml(g.sub)}<span class="group-count">${files.length}件</span>${extractBtnHtml}`;
       if (canExtract) {
         head.querySelector('.group-action').addEventListener('click', (e) => {
           e.stopPropagation();
           extractSubfolder(g.subPath);
         });
       }
+      if (g.subPath) setupGroupDrag(head, g.subPath);
       body.appendChild(head);
     }
     for (const f of files) body.appendChild(createCard(f));
@@ -1622,7 +1703,6 @@ function createCard(file) {
       </div>
     `;
     card.addEventListener('click', () => onCardClick(file));
-    card.addEventListener('dblclick', () => onCardDblClick(file));
     card.querySelector('.card-dl-btn').addEventListener('click', (e) => {
       e.stopPropagation();
       downloadFile(file);
