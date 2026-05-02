@@ -1163,6 +1163,45 @@ async function dbxDownload(path) {
   return res.blob();
 }
 
+async function listSharedLinkRecursive(url) {
+  // shared_link での list_folder は recursive 不可。
+  // サブフォルダを発見したら個別に list_folder を呼ぶ。
+  const all = [];
+  let totalDirs = 0;
+  async function walk(path) {
+    showLoading(`共有リンクを走査中... (${all.length}件)`);
+    let cursor = null, hasMore = true;
+    const subFolders = [];
+    while (hasMore) {
+      const result = cursor
+        ? await dbxApi('/2/files/list_folder/continue', { cursor })
+        : await dbxApi('/2/files/list_folder', {
+            path,
+            shared_link: { url },
+            recursive: false,
+            limit: 2000,
+          });
+      for (const entry of (result.entries || [])) {
+        all.push(entry);
+        if (entry['.tag'] === 'folder') subFolders.push(entry);
+      }
+      cursor = result.cursor;
+      hasMore = result.has_more;
+    }
+    for (const f of subFolders) {
+      const subPath = f.path_display || f.path_lower || `${path}/${f.name}`;
+      totalDirs++;
+      if (totalDirs > 100) {
+        console.warn('Too many folders, stopping recursion');
+        return;
+      }
+      await walk(subPath);
+    }
+  }
+  await walk('');
+  return all;
+}
+
 async function dbxGetSharedLinkFile(url, path) {
   const arg = path ? { url, path } : { url };
   const res = await fetch('https://content.dropboxapi.com/2/sharing/get_shared_link_file', {
@@ -1288,22 +1327,8 @@ async function addSharedLink(url) {
   try {
     const meta = await dbxApi('/2/sharing/get_shared_link_metadata', { url });
     if (meta['.tag'] === 'folder') {
-      // フォルダ共有リンク → /2/files/list_folder に shared_link を渡す
-      let cursor = null, hasMore = true;
-      const entries = [];
-      while (hasMore) {
-        const result = cursor
-          ? await dbxApi('/2/files/list_folder/continue', { cursor })
-          : await dbxApi('/2/files/list_folder', {
-              path: '',
-              shared_link: { url },
-              recursive: true,
-              limit: 2000,
-            });
-        entries.push(...(result.entries || []));
-        cursor = result.cursor;
-        hasMore = result.has_more;
-      }
+      // フォルダ共有リンク → 共有リンクは recursive 不可なので、サブフォルダを順次走査
+      const entries = await listSharedLinkRecursive(url);
       // root に折りたたんで追加
       if (!state.rootHandle && state.source !== 'dropbox') {
         // 初回: ルートを「リンク集」として作る
