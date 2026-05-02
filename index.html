@@ -7,7 +7,11 @@
 <title>DROP BOX CHECK!</title>
 <link rel="manifest" href="./manifest.json" />
 <link rel="icon" type="image/svg+xml" href="./icon.svg" />
+<link rel="icon" type="image/x-icon" href="./favicon.ico" />
+<link rel="icon" type="image/png" sizes="192x192" href="./icon-192.png" />
+<link rel="icon" type="image/png" sizes="512x512" href="./icon-512.png" />
 <link rel="apple-touch-icon" href="./icon-192.png" />
+<link rel="apple-touch-icon" sizes="512x512" href="./icon-512.png" />
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <style>
   :root {
@@ -1282,6 +1286,12 @@ async function listSharedLinkRecursive(url) {
   return all;
 }
 
+async function dbxGetTemporaryLink(path) {
+  // Dropbox の自分のフォルダのファイル → 4時間有効な直接URL
+  const result = await dbxApi('/2/files/get_temporary_link', { path });
+  return result.link;
+}
+
 async function dbxGetSharedLinkFile(url, path) {
   const arg = path ? { url, path } : { url };
   const res = await fetch('https://content.dropboxapi.com/2/sharing/get_shared_link_file', {
@@ -2118,15 +2128,23 @@ async function openPreviewModal(file) {
   els.previewModal.classList.remove('hidden');
   updatePreviewNav();
   try {
-    const blob = await getFileBlob(file);
-    if (pmCurrentObjectUrl) URL.revokeObjectURL(pmCurrentObjectUrl);
-    pmCurrentObjectUrl = URL.createObjectURL(blob);
+    let srcUrl;
+    if (file.dbxPath && state.dbxToken) {
+      // Dropbox 自分のファイル → temporary_link でストリーミング
+      srcUrl = await dbxGetTemporaryLink(file.dbxPath);
+    } else {
+      // ローカル or 共有リンク → blob URL
+      const blob = await getFileBlob(file);
+      if (pmCurrentObjectUrl) URL.revokeObjectURL(pmCurrentObjectUrl);
+      srcUrl = URL.createObjectURL(blob);
+      pmCurrentObjectUrl = srcUrl;
+    }
     if (file.type === 'image') {
-      els.pmBody.innerHTML = `<img src="${pmCurrentObjectUrl}" alt="">`;
+      els.pmBody.innerHTML = `<img src="${srcUrl}" alt="">`;
     } else if (file.type === 'video') {
-      els.pmBody.innerHTML = `<video src="${pmCurrentObjectUrl}" controls autoplay></video>`;
+      els.pmBody.innerHTML = `<video src="${srcUrl}" controls autoplay></video>`;
     } else if (file.type === 'pdf') {
-      els.pmBody.innerHTML = `<iframe src="${pmCurrentObjectUrl}#view=FitH" title="PDF preview"></iframe>`;
+      els.pmBody.innerHTML = `<iframe src="${srcUrl}#view=FitH" title="PDF preview"></iframe>`;
     } else {
       els.pmBody.innerHTML = `<div class="preview-modal-empty">プレビュー不可</div>`;
     }
@@ -2286,11 +2304,18 @@ async function playAudioFile(item, opts = {}) {
     return;
   }
   try {
-    const f = await getFileBlob(item);
-    if (state.currentObjectUrl) URL.revokeObjectURL(state.currentObjectUrl);
-    const url = URL.createObjectURL(f);
-    state.currentObjectUrl = url;
-    els.audio.src = url;
+    let srcUrl;
+    if (item.dbxPath && state.dbxToken) {
+      // Dropbox 自分のファイル → temporary_link でブラウザネイティブストリーミング
+      srcUrl = await dbxGetTemporaryLink(item.dbxPath);
+    } else {
+      // ローカル or 共有リンク → blob URL
+      const f = await getFileBlob(item);
+      if (state.currentObjectUrl) URL.revokeObjectURL(state.currentObjectUrl);
+      srcUrl = URL.createObjectURL(f);
+      state.currentObjectUrl = srcUrl;
+    }
+    els.audio.src = srcUrl;
     els.audio.volume = parseFloat(els.volumeSlider.value);
     els.player.classList.remove('disabled');
     els.playerTitle.textContent = item.name;
@@ -2298,7 +2323,6 @@ async function playAudioFile(item, opts = {}) {
     state.audioIndex = state.audioQueue.findIndex(a => a.path === item.path);
     if (autoPlay) {
       await els.audio.play().catch((err) => {
-        // 自動再生がブロックされた場合（初回ユーザー操作前など）
         console.warn('autoplay blocked:', err);
       });
     }
