@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#262624"/>
+  <rect x="64" y="120" width="384" height="280" rx="20" fill="#323230" stroke="#46463f" stroke-width="3"/>
+  <rect x="64" y="120" width="384" height="48" rx="20" fill="#5ec0b8"/>
+  <rect x="64" y="148" width="384" height="20" fill="#5ec0b8"/>
+  <circle cx="92" cy="144" r="6" fill="#262624"/>
+  <circle cx="116" cy="144" r="6" fill="#262624"/>
+  <circle cx="140" cy="144" r="6" fill="#262624"/>
+  <rect x="96" y="200" width="100" height="140" rx="8" fill="#d4825e"/>
+  <rect x="208" y="200" width="100" height="140" rx="8" fill="#c186c8"/>
+  <rect x="320" y="200" width="96" height="140" rx="8" fill="#e8c560"/>
+  <text x="146" y="280" font-family="Arial, sans-serif" font-size="28" font-weight="800" fill="#262624" text-anchor="middle">AUDIO</text>
+  <text x="258" y="280" font-family="Arial, sans-serif" font-size="32" font-weight="800" fill="#262624" text-anchor="middle">PDF</text>
+  <text x="368" y="280" font-family="Arial, sans-serif" font-size="32" font-weight="800" fill="#262624" text-anchor="middle">IMG</text>
+</svg>
