@@ -1251,21 +1251,38 @@ async function listSharedLinkRecursive(url) {
   // shared_link での list_folder は recursive 不可。
   // サブフォルダを発見したら個別に list_folder を呼ぶ。
   const all = [];
+  const visited = new Set();   // 走査済み path（無限ループ防止）
+  const seenIds = new Set();   // 取得済み entry id（重複防止）
   let totalDirs = 0;
   async function walk(path) {
+    if (visited.has(path)) {
+      console.warn('Already visited:', path, '— skipping');
+      return;
+    }
+    visited.add(path);
     showLoading(`共有リンクを走査中... (${all.length}件)`);
     let cursor = null, hasMore = true;
     const subFolders = [];
     while (hasMore) {
-      const result = cursor
-        ? await dbxApi('/2/files/list_folder/continue', { cursor })
-        : await dbxApi('/2/files/list_folder', {
-            path,
-            shared_link: { url },
-            recursive: false,
-            limit: 2000,
-          });
+      let result;
+      try {
+        result = cursor
+          ? await dbxApi('/2/files/list_folder/continue', { cursor })
+          : await dbxApi('/2/files/list_folder', {
+              path,
+              shared_link: { url },
+              recursive: false,
+              limit: 2000,
+            });
+      } catch (e) {
+        console.warn('list_folder failed for path:', path, e);
+        return;
+      }
+      console.log('list_folder', path, '→ entries:', (result.entries || []).length);
       for (const entry of (result.entries || [])) {
+        const id = entry.id || entry.path_lower || entry.name;
+        if (seenIds.has(id)) continue;
+        seenIds.add(id);
         all.push(entry);
         if (entry['.tag'] === 'folder') subFolders.push(entry);
       }
@@ -1273,9 +1290,10 @@ async function listSharedLinkRecursive(url) {
       hasMore = result.has_more;
     }
     for (const f of subFolders) {
-      const subPath = f.path_display || f.path_lower || `${path}/${f.name}`;
+      const subPath = f.path_display || f.path_lower;
+      if (!subPath || subPath === path || visited.has(subPath)) continue;
       totalDirs++;
-      if (totalDirs > 100) {
+      if (totalDirs > 200) {
         console.warn('Too many folders, stopping recursion');
         return;
       }
@@ -1283,6 +1301,7 @@ async function listSharedLinkRecursive(url) {
     }
   }
   await walk('');
+  console.log('Shared link scan complete:', all.length, 'entries,', totalDirs, 'subfolders');
   return all;
 }
 
