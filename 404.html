@@ -1568,12 +1568,15 @@ async function addSharedLink(url, opts = {}) {
       // 新しい共有リンクのカラムを左端（プロジェクト列の右隣）に追加
       state.columnOrder = state.columnOrder.filter(id => id !== folderPath);
       state.columnOrder.unshift(folderPath);
+      console.log('[shared] Added folder:', folderPath, '| rootChildren:', state.rootChildren.length, '| columnOrder.head:', state.columnOrder.slice(0, 3));
       reconcileColumnOrder();
+      console.log('[shared] After reconcile, columnOrder.head:', state.columnOrder.slice(0, 3));
       renderColumns();
       // スクロールして見せる
       setTimeout(() => {
         const targetCol = els.columns.querySelector(`.column[data-col-id="${cssEscape(folderPath)}"]`);
         if (targetCol) targetCol.scrollIntoView({ inline: 'start', behavior: 'smooth', block: 'nearest' });
+        else console.warn('[shared] Column not in DOM:', folderPath);
       }, 100);
     } else if (meta['.tag'] === 'file') {
       // 個別ファイル共有リンク
