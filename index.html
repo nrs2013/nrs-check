@@ -1151,6 +1151,22 @@ async function checkOAuthCallback() {
       state.dbxToken = saved;
       state.dbxRefresh = refresh;
       updateDbxBtnUI();
+      // 自動でDropboxを再読み込み（前回の状態を復元）
+      try {
+        await dbxLoadRoot();
+        // 保存された共有リンクも復元
+        const savedLinks = JSON.parse(localStorage.getItem('dbx_shared_links') || '[]');
+        for (const linkUrl of savedLinks) {
+          try { await addSharedLink(linkUrl, { skipSave: true }); }
+          catch (e) { console.warn('Failed to restore shared link:', linkUrl, e); }
+        }
+      } catch (e) {
+        console.warn('Auto-restore failed (token may be expired):', e);
+        // トークン切れ → ボタンを未接続表示に戻す（再ログインが必要）
+        if (e.message && e.message.includes('401')) {
+          dbxLogout();
+        }
+      }
     }
     return;
   }
@@ -1205,18 +1221,42 @@ function updateDbxBtnUI() {
   }
 }
 
-function dbxLogout() {
-  if (!confirm('Dropbox からログアウトしますか？')) return;
+function dbxLogout(skipConfirm) {
+  if (!skipConfirm && !confirm('Dropbox からログアウトしますか？\n（保存された共有リンクも消えます）')) return;
   state.dbxToken = null;
   state.dbxRefresh = null;
   localStorage.removeItem('dbx_token');
   localStorage.removeItem('dbx_refresh');
+  localStorage.removeItem('dbx_shared_links');
   updateDbxBtnUI();
 }
 
 // ===== DROPBOX API =====
+async function dbxRefreshToken() {
+  if (!state.dbxRefresh) return false;
+  try {
+    const res = await fetch('https://api.dropboxapi.com/oauth2/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: state.dbxRefresh,
+        client_id: DROPBOX_APP_KEY,
+      }),
+    });
+    const data = await res.json();
+    if (data.access_token) {
+      state.dbxToken = data.access_token;
+      localStorage.setItem('dbx_token', data.access_token);
+      console.log('Dropbox token refreshed');
+      return true;
+    }
+  } catch (e) { console.error('Refresh failed:', e); }
+  return false;
+}
+
 async function dbxApi(endpoint, body) {
-  const res = await fetch('https://api.dropboxapi.com' + endpoint, {
+  const doFetch = () => fetch('https://api.dropboxapi.com' + endpoint, {
     method: 'POST',
     headers: {
       'Authorization': 'Bearer ' + state.dbxToken,
@@ -1224,11 +1264,16 @@ async function dbxApi(endpoint, body) {
     },
     body: JSON.stringify(body),
   });
+  let res = await doFetch();
+  if (res.status === 401 && state.dbxRefresh) {
+    const refreshed = await dbxRefreshToken();
+    if (refreshed) res = await doFetch();
+  }
   if (!res.ok) {
     const txt = await res.text();
     if (res.status === 401) {
       alert('Dropbox トークン期限切れ。もう一度ログインしてください。');
-      dbxLogout();
+      dbxLogout(true);
     }
     throw new Error('Dropbox API: ' + txt);
   }
@@ -1429,7 +1474,7 @@ async function getFileBlob(item) {
 }
 
 // ===== SHARED LINK ADD =====
-async function addSharedLink(url) {
+async function addSharedLink(url, opts = {}) {
   if (!state.dbxToken) {
     alert('まず Dropbox にログインしてください');
     return;
@@ -1438,6 +1483,16 @@ async function addSharedLink(url) {
   if (!url.startsWith('https://www.dropbox.com/') && !url.startsWith('https://dropbox.com/')) {
     alert('Dropbox の共有リンクを貼ってください');
     return;
+  }
+  // 永続化: localStorage に追加
+  if (!opts.skipSave) {
+    try {
+      const savedLinks = JSON.parse(localStorage.getItem('dbx_shared_links') || '[]');
+      if (!savedLinks.includes(url)) {
+        savedLinks.push(url);
+        localStorage.setItem('dbx_shared_links', JSON.stringify(savedLinks));
+      }
+    } catch {}
   }
   showLoading('共有リンクを解析中...');
   try {
