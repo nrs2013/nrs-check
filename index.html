@@ -1519,6 +1519,7 @@ async function addSharedLink(url, opts = {}) {
         state.pathMap.set(folderPath, folderNode);
         root.children.push(folderNode);
       }
+      console.log('Adding entries to tree:', entries.length, entries.slice(0, 3).map(e => e.path_display));
       // 各エントリ追加（再帰的にフォルダ階層を構築）
       for (const entry of entries) {
         const relPath = (entry.path_display || entry.path_lower || '').replace(/^\//, '');
@@ -1564,8 +1565,16 @@ async function addSharedLink(url, opts = {}) {
       sortTree(folderNode);
       state.rootChildren = root.children.filter(c => c.kind === 'directory');
       state.audioQueue = buildAudioQueue(root);
+      // 新しい共有リンクのカラムを左端（プロジェクト列の右隣）に追加
+      state.columnOrder = state.columnOrder.filter(id => id !== folderPath);
+      state.columnOrder.unshift(folderPath);
       reconcileColumnOrder();
       renderColumns();
+      // スクロールして見せる
+      setTimeout(() => {
+        const targetCol = els.columns.querySelector(`.column[data-col-id="${cssEscape(folderPath)}"]`);
+        if (targetCol) targetCol.scrollIntoView({ inline: 'start', behavior: 'smooth', block: 'nearest' });
+      }, 100);
     } else if (meta['.tag'] === 'file') {
       // 個別ファイル共有リンク
       if (!state.pathMap.get('')) {
