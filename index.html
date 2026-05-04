@@ -1875,11 +1875,12 @@ function renderColumns() {
   els.columns.className = 'columns' + (state.view === 'list' ? ' list-mode' : '');
   els.columns.innerHTML = '';
 
-  if (!state.rootHandle) {
+  // empty state: ローカルフォルダ未選択 かつ Dropbox 未ロードの両方が空のとき
+  if (!state.rootHandle && !state.rootName) {
     els.columns.innerHTML = `
       <div class="columns-empty">
         <div class="big">DROP BOX CHECK!</div>
-        <p>右上の「フォルダを開く」を押して、Dropbox の中の<br>プロジェクトフォルダを選んでください。</p>
+        <p>右上の「フォルダを開く」「Dropbox」「+ リンク」<br>のいずれかからファイルを取り込んでください。</p>
         <p style="color:var(--text-3);font-size:11.5px;">
           <kbd>Space</kbd> 再生 / 停止　<kbd>↑</kbd> <kbd>↓</kbd> 曲送り　<kbd>←</kbd> <kbd>→</kbd> 5秒シーク
         </p>
