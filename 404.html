@@ -1040,6 +1040,9 @@ const state = {
   columnOrder: [],      // ordered array of column IDs (dir.path or 'x:subPath')
   extracted: new Set(), // sub-folder paths shown as independent columns
   collapsed: new Set(), // column IDs that are collapsed (folded)
+  // ===== Multi-project state =====
+  projects: [],         // [{ id, name, type:'local'|'mydbx'|'shared', root, url? }]
+  activeProjectId: null,
   dbxToken: null,       // Dropbox access token
   dbxRefresh: null,
   source: 'local',      // 'local' | 'dropbox'
@@ -1376,47 +1379,96 @@ async function dbxGetSharedLinkFile(url, path) {
   return res.blob();
 }
 
+// ===== PROJECT MANAGEMENT =====
+function getProject(id) {
+  return state.projects.find(p => p.id === id);
+}
+
+function ensureProject(id, name, type, opts = {}) {
+  let p = getProject(id);
+  if (!p) {
+    p = {
+      id, name, type,
+      url: opts.url || null,
+      root: { name, path: '', kind: 'directory', children: [], dbxPath: '' },
+      pathMap: new Map(),
+      columnOrder: [],
+      extracted: new Set(),
+      collapsed: new Set(),
+    };
+    p.pathMap.set('', p.root);
+    state.projects.push(p);
+  }
+  return p;
+}
+
+function switchProject(id) {
+  const p = getProject(id);
+  if (!p) return;
+  // 現在のプロジェクトの状態を保存
+  const cur = getProject(state.activeProjectId);
+  if (cur) {
+    cur.columnOrder = state.columnOrder;
+    cur.extracted = state.extracted;
+    cur.collapsed = state.collapsed;
+  }
+  state.activeProjectId = id;
+  state.pathMap = p.pathMap;
+  state.rootName = p.name;
+  state.source = p.type === 'local' ? 'local' : 'dropbox';
+  state.rootHandle = p.rootHandle || null;
+  state.rootChildren = (p.root.children || []).filter(c => c.kind === 'directory');
+  state.audioQueue = buildAudioQueue(p.root);
+  state.columnOrder = p.columnOrder || [];
+  state.extracted = p.extracted || new Set();
+  state.collapsed = p.collapsed || new Set();
+  els.appSub.textContent = p.name;
+  let fileCount = 0;
+  function count(n) { for (const c of (n.children || [])) { if (c.kind === 'file') fileCount++; else count(c); } }
+  count(p.root);
+  els.statTag.innerHTML = `<strong>${fileCount}</strong> 件`;
+  saveProjectsList();
+  reconcileColumnOrder();
+  renderColumns();
+}
+
+function saveProjectsList() {
+  // 共有リンクの URL のみ保存 (My Dropbox は token から自動再構築)
+  const sharedUrls = state.projects.filter(p => p.type === 'shared').map(p => p.url).filter(Boolean);
+  localStorage.setItem('dbx_shared_links', JSON.stringify(sharedUrls));
+}
+
 async function dbxLoadRoot() {
   if (!state.dbxToken) return;
   showLoading('Dropbox 読み込み中...');
-  state.pathMap.clear();
   state.thumbCache.clear();
   try {
-    const root = { name: 'My Dropbox', path: '', kind: 'directory', children: [], dbxPath: '' };
-    state.pathMap.set('', root);
-    state.rootName = 'My Dropbox';
-    state.rootHandle = null;
-    state.source = 'dropbox';
-    els.appSub.textContent = 'My Dropbox';
-
+    const p = ensureProject('mydbx', 'My Dropbox', 'mydbx');
+    // Project の root を一旦リセット
+    p.root.children = [];
+    p.pathMap.clear();
+    p.pathMap.set('', p.root);
     let cursor = null, hasMore = true, total = 0;
     while (hasMore) {
       const result = cursor
         ? await dbxApi('/2/files/list_folder/continue', { cursor })
         : await dbxApi('/2/files/list_folder', { path: '', recursive: true, limit: 2000 });
       for (const entry of result.entries) {
-        addDbxEntry(root, entry);
+        addDbxEntryToProject(p, entry);
         total++;
       }
       cursor = result.cursor;
       hasMore = result.has_more;
       if (hasMore) showLoading(`Dropbox 読み込み中 ${total}件...`);
     }
-    sortTree(root);
-    state.rootChildren = root.children.filter(c => c.kind === 'directory');
-    state.audioQueue = buildAudioQueue(root);
-    let fileCount = 0;
-    function count(n) { for (const c of (n.children || [])) { if (c.kind === 'file') fileCount++; else count(c); } }
-    count(root);
-    els.statTag.innerHTML = `<strong>${fileCount}</strong> 件 (Dropbox)`;
+    sortTree(p.root);
     state.filter = 'all';
     els.segAll.classList.add('active');
     els.segAudio.classList.remove('active');
-    state.columnOrder = [];
-    state.extracted = new Set();
-    loadLayout();
-    reconcileColumnOrder();
-    renderColumns();
+    // アクティブが無ければ自動でアクティブ化
+    if (!state.activeProjectId) switchProject('mydbx');
+    else if (state.activeProjectId === 'mydbx') switchProject('mydbx');
+    else renderColumns();  // 別 project が active なら左カラム再描画だけ
   } catch (e) {
     alert('Dropbox 読み込みエラー: ' + e.message);
   } finally {
@@ -1425,41 +1477,50 @@ async function dbxLoadRoot() {
 }
 
 function addDbxEntry(root, entry) {
+  return addDbxEntryToProject({ root, pathMap: state.pathMap }, entry);
+}
+
+function addDbxEntryToProject(project, entry) {
   // entry.path_lower like '/01_音源/m01_op.wav'
   // entry.path_display preserves case
   const fullPath = (entry.path_display || entry.path_lower || '').replace(/^\//, '');
   if (!fullPath) return;
   const parts = fullPath.split('/');
   const name = parts[parts.length - 1];
-  // ensure all parent dirs exist
-  let parent = root;
+  let parent = project.root;
   let curPath = '';
   for (let i = 0; i < parts.length - 1; i++) {
     curPath = curPath ? curPath + '/' + parts[i] : parts[i];
-    let next = state.pathMap.get(curPath);
+    let next = project.pathMap.get(curPath);
     if (!next) {
       next = { name: parts[i], path: curPath, kind: 'directory', children: [], parent, dbxPath: '/' + curPath };
-      state.pathMap.set(curPath, next);
+      project.pathMap.set(curPath, next);
       parent.children.push(next);
     }
     parent = next;
   }
   if (entry['.tag'] === 'folder') {
-    if (!state.pathMap.has(fullPath)) {
+    if (!project.pathMap.has(fullPath)) {
       const dir = { name, path: fullPath, kind: 'directory', children: [], parent, dbxPath: '/' + fullPath };
-      state.pathMap.set(fullPath, dir);
+      project.pathMap.set(fullPath, dir);
       parent.children.push(dir);
     }
   } else if (entry['.tag'] === 'file') {
+    const isShared = !!entry._sharedLinkUrl;
     const f = {
       name, path: fullPath, kind: 'file',
       type: classify(name),
       size: entry.size || 0,
       dur: 0,
-      dbxPath: '/' + fullPath,
       parent,
     };
-    state.pathMap.set(fullPath, f);
+    if (isShared) {
+      f.dbxLinkUrl = entry._sharedLinkUrl;
+      f.dbxLinkPath = '/' + fullPath;
+    } else {
+      f.dbxPath = '/' + fullPath;
+    }
+    project.pathMap.set(fullPath, f);
     parent.children.push(f);
   }
 }
@@ -1484,133 +1545,48 @@ async function addSharedLink(url, opts = {}) {
     alert('Dropbox の共有リンクを貼ってください');
     return;
   }
-  // 永続化: localStorage に追加
-  if (!opts.skipSave) {
-    try {
-      const savedLinks = JSON.parse(localStorage.getItem('dbx_shared_links') || '[]');
-      if (!savedLinks.includes(url)) {
-        savedLinks.push(url);
-        localStorage.setItem('dbx_shared_links', JSON.stringify(savedLinks));
-      }
-    } catch {}
+  const projectId = 'shared:' + url;
+  // 既に追加済み → そのプロジェクトに切替えるだけ
+  if (getProject(projectId)) {
+    switchProject(projectId);
+    return;
   }
   showLoading('共有リンクを解析中...');
   try {
     const meta = await dbxApi('/2/sharing/get_shared_link_metadata', { url });
     if (meta['.tag'] === 'folder') {
-      // フォルダ共有リンク → 共有リンクは recursive 不可なので、サブフォルダを順次走査
+      // 独立したプロジェクトとして登録
+      const project = ensureProject(projectId, meta.name, 'shared', { url });
+      project.root.children = [];
+      project.pathMap.clear();
+      project.pathMap.set('', project.root);
       const entries = await listSharedLinkRecursive(url);
-      // root に折りたたんで追加
-      if (!state.rootHandle && state.source !== 'dropbox') {
-        // 初回: ルートを「リンク集」として作る
-        state.rootName = 'Shared Links';
-        state.source = 'dropbox';
-        els.appSub.textContent = 'Shared Links';
-        const root = { name: 'Shared Links', path: '', kind: 'directory', children: [] };
-        state.pathMap.set('', root);
-      }
-      const root = state.pathMap.get('');
-      // フォルダノード作成
-      const folderName = meta.name + ' (共有)';
-      const folderPath = folderName;
-      let folderNode = state.pathMap.get(folderPath);
-      if (!folderNode) {
-        folderNode = { name: folderName, path: folderPath, kind: 'directory', children: [], parent: root };
-        state.pathMap.set(folderPath, folderNode);
-        root.children.push(folderNode);
-      }
-      console.log('Adding entries to tree:', entries.length, entries.slice(0, 3).map(e => e.path_display));
-      // 各エントリ追加（再帰的にフォルダ階層を構築）
+      console.log('[shared] Building project:', meta.name, 'with', entries.length, 'entries');
       for (const entry of entries) {
-        const relPath = (entry.path_display || entry.path_lower || '').replace(/^\//, '');
-        if (!relPath) continue;
-        const parts = relPath.split('/');
-        const name = parts[parts.length - 1];
-        // 親フォルダを順に作る
-        let parent = folderNode;
-        let curPath = folderPath;
-        for (let i = 0; i < parts.length - 1; i++) {
-          curPath = curPath + '/' + parts[i];
-          let next = state.pathMap.get(curPath);
-          if (!next) {
-            next = { name: parts[i], path: curPath, kind: 'directory', children: [], parent };
-            state.pathMap.set(curPath, next);
-            parent.children.push(next);
-          }
-          parent = next;
-        }
-        const childPath = curPath + '/' + name;
-        if (entry['.tag'] === 'folder') {
-          if (!state.pathMap.has(childPath)) {
-            const dir = { name, path: childPath, kind: 'directory', children: [], parent };
-            state.pathMap.set(childPath, dir);
-            parent.children.push(dir);
-          }
-        } else if (entry['.tag'] === 'file') {
-          if (!state.pathMap.has(childPath)) {
-            const f = {
-              name, path: childPath, kind: 'file',
-              type: classify(name),
-              size: entry.size || 0,
-              dur: 0,
-              dbxLinkUrl: url,
-              dbxLinkPath: '/' + relPath,
-              parent,
-            };
-            state.pathMap.set(childPath, f);
-            parent.children.push(f);
-          }
-        }
+        addDbxEntryToProject(project, entry);
       }
-      sortTree(folderNode);
-      state.rootChildren = root.children.filter(c => c.kind === 'directory');
-      state.audioQueue = buildAudioQueue(root);
-      // 新しい共有リンクのカラムを左端（プロジェクト列の右隣）に追加
-      state.columnOrder = state.columnOrder.filter(id => id !== folderPath);
-      state.columnOrder.unshift(folderPath);
-      console.log('[shared] Added folder:', folderPath, '| rootChildren:', state.rootChildren.length, '| columnOrder.head:', state.columnOrder.slice(0, 3));
-      reconcileColumnOrder();
-      console.log('[shared] After reconcile, columnOrder.head:', state.columnOrder.slice(0, 3));
-      renderColumns();
-      // スクロールして見せる
-      setTimeout(() => {
-        const targetCol = els.columns.querySelector(`.column[data-col-id="${cssEscape(folderPath)}"]`);
-        if (targetCol) targetCol.scrollIntoView({ inline: 'start', behavior: 'smooth', block: 'nearest' });
-        else console.warn('[shared] Column not in DOM:', folderPath);
-      }, 100);
+      sortTree(project.root);
+      // localStorage 永続化
+      if (!opts.skipSave) saveProjectsList();
+      // 自動でアクティブ化（左カラムに表示 + 中身が右側に展開）
+      switchProject(projectId);
     } else if (meta['.tag'] === 'file') {
-      // 個別ファイル共有リンク
-      if (!state.pathMap.get('')) {
-        state.rootName = 'Shared Links';
-        state.source = 'dropbox';
-        els.appSub.textContent = 'Shared Links';
-        const root = { name: 'Shared Links', path: '', kind: 'directory', children: [] };
-        state.pathMap.set('', root);
-      }
-      const root = state.pathMap.get('');
-      let folderNode = state.pathMap.get('共有リンク');
-      if (!folderNode) {
-        folderNode = { name: '共有リンク', path: '共有リンク', kind: 'directory', children: [], parent: root };
-        state.pathMap.set('共有リンク', folderNode);
-        root.children.push(folderNode);
-      }
-      const childPath = '共有リンク/' + meta.name;
-      if (!state.pathMap.has(childPath)) {
-        const f = {
-          name: meta.name, path: childPath, kind: 'file',
-          type: classify(meta.name),
-          size: meta.size || 0, dur: 0,
-          dbxLinkUrl: url,
-          parent: folderNode,
-        };
-        state.pathMap.set(childPath, f);
-        folderNode.children.push(f);
-      }
-      sortTree(folderNode);
-      state.rootChildren = root.children.filter(c => c.kind === 'directory');
-      state.audioQueue = buildAudioQueue(root);
-      reconcileColumnOrder();
-      renderColumns();
+      // 個別ファイル共有リンク → 独立プロジェクトとして登録
+      const project = ensureProject(projectId, meta.name + ' (単体)', 'shared', { url });
+      project.root.children = [];
+      project.pathMap.clear();
+      project.pathMap.set('', project.root);
+      const f = {
+        name: meta.name, path: meta.name, kind: 'file',
+        type: classify(meta.name),
+        size: meta.size || 0, dur: 0,
+        dbxLinkUrl: url,
+        parent: project.root,
+      };
+      project.pathMap.set(meta.name, f);
+      project.root.children.push(f);
+      if (!opts.skipSave) saveProjectsList();
+      switchProject(projectId);
     }
   } catch (e) {
     alert('リンク追加エラー: ' + e.message);
@@ -1899,24 +1875,44 @@ function renderColumns() {
   projCol.innerHTML = `
     <div class="col-header">
       <span class="col-title">DROPBOX</span>
-      <span class="col-count">1</span>
+      <span class="col-count">${Math.max(state.projects.length, 1)}</span>
     </div>
     <div class="col-body" id="projBody"></div>
   `;
   els.columns.appendChild(projCol);
   const projBody = projCol.querySelector('#projBody');
-  const totalCount = countAll(state.pathMap.get(''));
-  const card = document.createElement('div');
-  card.className = 'proj-card active';
-  card.innerHTML = `
-    <div class="proj-card-name">${escapeHtml(state.rootName)}</div>
-    <div class="proj-card-detail">
-      <span>${totalCount}件</span>
-      <span class="dot">·</span>
-      <span>選択中</span>
-    </div>
-  `;
-  projBody.appendChild(card);
+  // プロジェクトリスト（複数あれば全部、無ければ単体rootName）
+  if (state.projects.length > 0) {
+    for (const p of state.projects) {
+      const total = countAll(p.root);
+      const card = document.createElement('div');
+      card.className = 'proj-card' + (p.id === state.activeProjectId ? ' active' : '');
+      const typeLabel = p.type === 'mydbx' ? 'My Dropbox' : (p.type === 'shared' ? '共有' : 'ローカル');
+      card.innerHTML = `
+        <div class="proj-card-name">${escapeHtml(p.name)}</div>
+        <div class="proj-card-detail">
+          <span>${typeLabel}</span>
+          <span class="dot">·</span>
+          <span>${total}件</span>
+        </div>
+      `;
+      card.addEventListener('click', () => switchProject(p.id));
+      projBody.appendChild(card);
+    }
+  } else {
+    const totalCount = countAll(state.pathMap.get(''));
+    const card = document.createElement('div');
+    card.className = 'proj-card active';
+    card.innerHTML = `
+      <div class="proj-card-name">${escapeHtml(state.rootName)}</div>
+      <div class="proj-card-detail">
+        <span>${totalCount}件</span>
+        <span class="dot">·</span>
+        <span>選択中</span>
+      </div>
+    `;
+    projBody.appendChild(card);
+  }
 
   // FOLDER columns based on columnOrder
   if (state.columnOrder.length === 0) {
