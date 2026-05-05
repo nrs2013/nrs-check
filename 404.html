@@ -1360,6 +1360,22 @@ async function listSharedLinkSubfolder(url, path) {
   return all;
 }
 
+function buildSharedDirectUrl(linkUrl, relPath) {
+  // フォルダ共有リンク内のファイルへの直接URL: linkUrl + relPath + dl=1
+  try {
+    const u = new URL(linkUrl);
+    let p = u.pathname;
+    if (!p.endsWith('/')) p += '/';
+    p += String(relPath || '').replace(/^\/+/, '');
+    u.pathname = p;
+    u.searchParams.set('dl', '1');
+    u.searchParams.delete('e');
+    return u.toString();
+  } catch {
+    return linkUrl;
+  }
+}
+
 async function dbxGetTemporaryLink(path) {
   // Dropbox の自分のフォルダのファイル → 4時間有効な直接URL
   const result = await dbxApi('/2/files/get_temporary_link', { path });
@@ -2222,8 +2238,15 @@ async function openPreviewModal(file) {
     if (file.dbxPath && state.dbxToken) {
       // Dropbox 自分のファイル → temporary_link でストリーミング
       srcUrl = await dbxGetTemporaryLink(file.dbxPath);
+    } else if (file.dbxLinkUrl && file.dbxLinkPath) {
+      // 共有リンクのファイル → 直接URL (?dl=1) でストリーミング
+      srcUrl = buildSharedDirectUrl(file.dbxLinkUrl, file.dbxLinkPath);
+    } else if (file.dbxLinkUrl) {
+      // 個別ファイルの共有リンク
+      srcUrl = file.dbxLinkUrl.replace(/([?&])dl=0/, '$1dl=1');
+      if (!srcUrl.includes('dl=1')) srcUrl += (srcUrl.includes('?') ? '&' : '?') + 'dl=1';
     } else {
-      // ローカル or 共有リンク → blob URL
+      // ローカル → blob URL
       const blob = await getFileBlob(file);
       if (pmCurrentObjectUrl) URL.revokeObjectURL(pmCurrentObjectUrl);
       srcUrl = URL.createObjectURL(blob);
@@ -2232,7 +2255,8 @@ async function openPreviewModal(file) {
     if (file.type === 'image') {
       els.pmBody.innerHTML = `<img src="${srcUrl}" alt="">`;
     } else if (file.type === 'video') {
-      els.pmBody.innerHTML = `<video src="${srcUrl}" controls autoplay></video>`;
+      // autoplay しない: ▶ ボタン押すまで再生・データ取得しない（共有リンクの大きな動画でも軽快）
+      els.pmBody.innerHTML = `<video src="${srcUrl}" controls preload="metadata"></video>`;
     } else if (file.type === 'pdf') {
       els.pmBody.innerHTML = `<iframe src="${srcUrl}#view=FitH" title="PDF preview"></iframe>`;
     } else {
@@ -2398,8 +2422,15 @@ async function playAudioFile(item, opts = {}) {
     if (item.dbxPath && state.dbxToken) {
       // Dropbox 自分のファイル → temporary_link でブラウザネイティブストリーミング
       srcUrl = await dbxGetTemporaryLink(item.dbxPath);
+    } else if (item.dbxLinkUrl && item.dbxLinkPath) {
+      // 共有リンクの音源 → 直接URL (?dl=1) でストリーミング、ダウンロードバー出ない
+      srcUrl = buildSharedDirectUrl(item.dbxLinkUrl, item.dbxLinkPath);
+    } else if (item.dbxLinkUrl) {
+      // 個別ファイルの共有リンク → そのまま dl=1 化
+      srcUrl = item.dbxLinkUrl.replace(/([?&])dl=0/, '$1dl=1');
+      if (!srcUrl.includes('dl=1')) srcUrl += (srcUrl.includes('?') ? '&' : '?') + 'dl=1';
     } else {
-      // ローカル or 共有リンク → blob URL
+      // ローカル → blob URL
       const f = await getFileBlob(item);
       if (state.currentObjectUrl) URL.revokeObjectURL(state.currentObjectUrl);
       srcUrl = URL.createObjectURL(f);
