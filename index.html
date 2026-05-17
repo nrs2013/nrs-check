@@ -292,6 +292,28 @@
     font-feature-settings: "tnum";
   }
   .status-tag strong { color: var(--text); font-weight: 600; }
+  .search-input {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 10px;
+    border-radius: 7px;
+    font-size: 12px;
+    font-family: inherit;
+    width: 200px;
+    outline: none;
+    letter-spacing: -0.01em;
+  }
+  .search-input:focus { border-color: var(--accent); }
+  .search-input::placeholder { color: var(--text-3); }
+  .search-input::-webkit-search-cancel-button {
+    -webkit-appearance: none;
+    height: 12px; width: 12px;
+    background: var(--text-3);
+    -webkit-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path d='M18 6L6 18M6 6l12 12' stroke='currentColor' stroke-width='3' fill='none' stroke-linecap='round'/></svg>") center/contain no-repeat;
+    mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path d='M18 6L6 18M6 6l12 12' stroke='currentColor' stroke-width='3' fill='none' stroke-linecap='round'/></svg>") center/contain no-repeat;
+    cursor: pointer;
+  }
 
   /* COLUMNS */
   .columns {
@@ -556,6 +578,25 @@
     font-family: inherit;
   }
   .proj-add:hover { background: var(--accent-2); }
+  .proj-expand-btn {
+    margin-top: 8px;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-2);
+    font-size: 10.5px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+    width: 100%;
+  }
+  .proj-expand-btn:hover { color: var(--accent); border-color: var(--accent); }
+  .proj-expand-btn.done {
+    color: var(--text-3);
+    border-style: dashed;
+    cursor: default;
+  }
+  .proj-expand-btn.done:hover { color: var(--text-3); border-color: var(--border); }
 
   /* GROUP HEADER */
   .group-header {
@@ -927,7 +968,8 @@
     <button class="active" id="seg-all">全件</button>
   </div>
   <span class="status-tag" id="statTag">未選択</span>
-  <div class="seg" style="margin-left: auto;">
+  <input type="search" id="searchInput" class="search-input" placeholder="ファイル名で検索…" style="margin-left: auto;" />
+  <div class="seg">
     <button id="viewThumb">サムネ</button>
     <button class="active" id="viewList">LIST</button>
   </div>
@@ -1030,6 +1072,7 @@ const state = {
   rootChildren: [],     // top-level dirs as columns
   pathMap: new Map(),
   filter: 'all',
+  search: '',           // 検索クエリ（lower-case）
   view: 'list',
   selectedPath: null,
   audioQueue: [],
@@ -1093,6 +1136,7 @@ const els = {
   audio: $('audioEl'),
   segAudio: $('seg-audio'),
   segAll: $('seg-all'),
+  searchInput: $('searchInput'),
   viewThumb: $('viewThumb'),
   viewList: $('viewList'),
   dbxLoginBtn: $('dbxLoginBtn'),
@@ -1295,41 +1339,101 @@ async function dbxDownload(path) {
   return res.blob();
 }
 
-async function listSharedLinkRecursive(url) {
-  // shared_link 経由は recursive 不可なので、最初の階層だけ取得。
-  // サブフォルダの中身は、ユーザーがそのフォルダをクリックした時に lazy load する。
-  const all = [];
-  let cursor = null, hasMore = true;
-  let safety = 0;
-  while (hasMore && safety < 50) {
-    safety++;
-    let result;
-    try {
-      result = cursor
-        ? await dbxApi('/2/files/list_folder/continue', { cursor })
-        : await dbxApi('/2/files/list_folder', {
-            path: '',
-            shared_link: { url },
-            recursive: false,
-            limit: 2000,
-          });
-    } catch (e) {
-      console.error('list_folder failed:', e);
-      throw e;
+async function dbxGetThumbnail(path, { size = 'w128h128', format = 'jpeg' } = {}) {
+  // get_thumbnail_v2: 画像・動画の軽量サムネを取得（全DLしない）
+  const arg = {
+    resource: { '.tag': 'path', path },
+    format, size, mode: 'strict',
+  };
+  let res = await fetch('https://content.dropboxapi.com/2/files/get_thumbnail_v2', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer ' + state.dbxToken,
+      'Dropbox-API-Arg': JSON.stringify(arg),
+    },
+  });
+  if (res.status === 401 && state.dbxRefresh) {
+    if (await dbxRefreshToken()) {
+      res = await fetch('https://content.dropboxapi.com/2/files/get_thumbnail_v2', {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer ' + state.dbxToken,
+          'Dropbox-API-Arg': JSON.stringify(arg),
+        },
+      });
     }
-    console.log('list_folder root → entries:', (result.entries || []).length);
-    all.push(...(result.entries || []));
-    cursor = result.cursor;
-    hasMore = result.has_more;
-    showLoading(`共有リンクを走査中... (${all.length}件)`);
   }
-  // entry の path_display を、shared_link root からの相対パスとして保存
-  // 各 entry に元 url を付与して、後の lazy load 時に使えるよう
-  for (const entry of all) {
-    entry._sharedLinkUrl = url;
+  if (!res.ok) throw new Error('thumbnail: ' + res.status);
+  return res.blob();
+}
+
+async function listSharedLinkRecursive(url, { deep = false } = {}) {
+  // shared_link 経由は recursive オプションが使えないので、deep モードでは
+  // 階層ごとに visited セットで巡回する。
+  const all = [];
+  const visited = new Set();
+  async function walkDir(dirPath) {
+    if (visited.has(dirPath)) return;
+    visited.add(dirPath);
+    let cursor = null, hasMore = true, safety = 0;
+    const subfoldersFound = [];
+    while (hasMore && safety < 50) {
+      safety++;
+      let result;
+      try {
+        result = cursor
+          ? await dbxApi('/2/files/list_folder/continue', { cursor })
+          : await dbxApi('/2/files/list_folder', {
+              path: dirPath,
+              shared_link: { url },
+              recursive: false,
+              limit: 2000,
+            });
+      } catch (e) {
+        console.error('list_folder failed at:', dirPath || '(root)', e);
+        return;
+      }
+      for (const entry of (result.entries || [])) {
+        entry._sharedLinkUrl = url;
+        all.push(entry);
+        if (deep && entry['.tag'] === 'folder') {
+          const subPath = entry.path_display || entry.path_lower;
+          if (subPath && !visited.has(subPath)) subfoldersFound.push(subPath);
+        }
+      }
+      cursor = result.cursor;
+      hasMore = result.has_more;
+      showLoading(`共有リンクを走査中... (${all.length}件)`);
+    }
+    if (deep) {
+      for (const sub of subfoldersFound) await walkDir(sub);
+    }
   }
-  console.log('Shared link scan complete:', all.length, 'entries (top-level only)');
+  await walkDir('');
+  console.log('Shared link scan complete:', all.length, 'entries', deep ? '(deep)' : '(top-level)');
   return all;
+}
+
+async function expandSharedProject(projectId) {
+  const p = getProject(projectId);
+  if (!p || p.type !== 'shared' || !p.url) return;
+  showLoading('共有リンクの全階層を読み込み中…');
+  try {
+    const entries = await listSharedLinkRecursive(p.url, { deep: true });
+    // project ツリーを再構築（深く展開された結果で上書き）
+    p.root.children = [];
+    p.pathMap.clear();
+    p.pathMap.set('', p.root);
+    for (const entry of entries) addDbxEntryToProject(p, entry);
+    sortTree(p.root);
+    p.expanded = true;
+    if (state.activeProjectId === projectId) switchProject(projectId);
+    else renderColumns();
+  } catch (e) {
+    alert('全階層読み込みエラー: ' + e.message);
+  } finally {
+    hideLoading();
+  }
 }
 
 async function listSharedLinkSubfolder(url, path) {
@@ -1492,10 +1596,6 @@ async function dbxLoadRoot() {
   }
 }
 
-function addDbxEntry(root, entry) {
-  return addDbxEntryToProject({ root, pathMap: state.pathMap }, entry);
-}
-
 function addDbxEntryToProject(project, entry) {
   // entry.path_lower like '/01_音源/m01_op.wav'
   // entry.path_display preserves case
@@ -1548,6 +1648,25 @@ async function getFileBlob(item) {
   if (item.dbxLinkUrl) return await dbxGetSharedLinkFile(item.dbxLinkUrl);
   if (item.dbxPath) return await dbxDownload(item.dbxPath);
   throw new Error('ファイルにアクセスできません');
+}
+
+// ===== UNIFIED STREAMING URL RESOLVER =====
+// Returns { url, isBlob } — isBlob:true なら呼び出し側で URL.revokeObjectURL の責任あり
+async function resolveStreamUrl(item) {
+  if (item.dbxPath && state.dbxToken) {
+    return { url: await dbxGetTemporaryLink(item.dbxPath), isBlob: false };
+  }
+  if (item.dbxLinkUrl && item.dbxLinkPath) {
+    return { url: buildSharedDirectUrl(item.dbxLinkUrl, item.dbxLinkPath), isBlob: false };
+  }
+  if (item.dbxLinkUrl) {
+    let u = item.dbxLinkUrl.replace(/([?&])dl=0/, '$1dl=1');
+    if (!u.includes('dl=1')) u += (u.includes('?') ? '&' : '?') + 'dl=1';
+    return { url: u, isBlob: false };
+  }
+  // ローカル → blob URL
+  const f = await getFileBlob(item);
+  return { url: URL.createObjectURL(f), isBlob: true };
 }
 
 // ===== SHARED LINK ADD =====
@@ -1904,6 +2023,12 @@ function renderColumns() {
       const card = document.createElement('div');
       card.className = 'proj-card' + (p.id === state.activeProjectId ? ' active' : '');
       const typeLabel = p.type === 'mydbx' ? 'My Dropbox' : (p.type === 'shared' ? '共有' : 'ローカル');
+      let expandBtn = '';
+      if (p.type === 'shared') {
+        expandBtn = p.expanded
+          ? `<button class="proj-expand-btn done" disabled>✓ 全階層展開済み</button>`
+          : `<button class="proj-expand-btn" data-expand="${escapeHtml(p.id)}">↓ 全階層を読み込む</button>`;
+      }
       card.innerHTML = `
         <div class="proj-card-name">${escapeHtml(p.name)}</div>
         <div class="proj-card-detail">
@@ -1911,8 +2036,16 @@ function renderColumns() {
           <span class="dot">·</span>
           <span>${total}件</span>
         </div>
+        ${expandBtn}
       `;
       card.addEventListener('click', () => switchProject(p.id));
+      const eb = card.querySelector('.proj-expand-btn:not(.done)');
+      if (eb) {
+        eb.addEventListener('click', (e) => {
+          e.stopPropagation();
+          expandSharedProject(p.id);
+        });
+      }
       projBody.appendChild(card);
     }
   } else {
@@ -1947,6 +2080,7 @@ function renderColumns() {
       const body = col.querySelector('.col-body');
       let files = rootFiles;
       if (state.filter === 'audio') files = files.filter(f => f.type === 'audio');
+      if (state.search) files = files.filter(f => f.name.toLowerCase().includes(state.search));
       for (const f of files) body.appendChild(createCard(f));
       els.columns.appendChild(col);
     }
@@ -2035,6 +2169,7 @@ function renderColumnById(colId) {
   for (const g of groups) {
     let files = g.files;
     if (state.filter === 'audio') files = files.filter(f => f.type === 'audio');
+    if (state.search) files = files.filter(f => f.name.toLowerCase().includes(state.search));
     if (files.length === 0) continue;
     if (g.sub) {
       const head = document.createElement('div');
@@ -2165,17 +2300,26 @@ async function loadImageThumbs() {
     const path = cardEl.dataset.path;
     const item = state.pathMap.get(path);
     if (!item || item.type !== 'image') continue;
-    // Skip remote thumbs (would download whole file just for thumb)
-    if (!item.handle) continue;
     try {
       let url = state.thumbCache.get(path);
       if (!url) {
-        const file = await getFileBlob(item);
-        url = URL.createObjectURL(file);
+        let blob;
+        if (item.handle) {
+          blob = await getFileBlob(item);
+        } else if (item.dbxPath && state.dbxToken) {
+          // My Dropbox: 軽量サムネ API（全DL回避）
+          blob = await dbxGetThumbnail(item.dbxPath, { size: 'w256h256' });
+        } else {
+          // 共有リンクのファイルはサムネ API 使えないので skip
+          continue;
+        }
+        url = URL.createObjectURL(blob);
         state.thumbCache.set(path, url);
       }
       el.innerHTML = `<img src="${url}" alt="" loading="lazy" />`;
-    } catch {}
+    } catch (e) {
+      // サムネ取得失敗時は fallback 表示のまま
+    }
   }
 }
 
@@ -2187,17 +2331,33 @@ async function loadVideoThumbs() {
     const path = cardEl.dataset.path;
     const item = state.pathMap.get(path);
     if (!item || item.type !== 'video') continue;
-    // Skip remote thumbs (large download cost)
-    if (!item.handle) continue;
     try {
       let url = state.thumbCache.get(path);
       if (!url) {
-        const file = await getFileBlob(item);
-        url = URL.createObjectURL(file);
-        state.thumbCache.set(path, url);
+        if (item.handle) {
+          const file = await getFileBlob(item);
+          url = URL.createObjectURL(file);
+          state.thumbCache.set(path, url);
+          el.innerHTML = `<video src="${url}#t=0.5" muted preload="metadata"></video>`;
+          continue;
+        }
+        if (item.dbxPath && state.dbxToken) {
+          // My Dropbox 動画: get_thumbnail_v2 は動画もカバー（最初のフレーム）
+          const blob = await dbxGetThumbnail(item.dbxPath, { size: 'w256h256' });
+          url = URL.createObjectURL(blob);
+          state.thumbCache.set(path, url);
+          el.innerHTML = `<img src="${url}" alt="" loading="lazy" />`;
+          continue;
+        }
+        // 共有リンク動画はサムネ取得しない（fallback 表示のまま）
+        continue;
       }
-      el.innerHTML = `<video src="${url}#t=0.5" muted preload="metadata"></video>`;
-    } catch {}
+      // キャッシュヒット: 拡張子で判定
+      if (item.handle) el.innerHTML = `<video src="${url}#t=0.5" muted preload="metadata"></video>`;
+      else el.innerHTML = `<img src="${url}" alt="" loading="lazy" />`;
+    } catch (e) {
+      // 失敗時は fallback 表示のまま
+    }
   }
 }
 
@@ -2234,24 +2394,9 @@ async function openPreviewModal(file) {
   els.previewModal.classList.remove('hidden');
   updatePreviewNav();
   try {
-    let srcUrl;
-    if (file.dbxPath && state.dbxToken) {
-      // Dropbox 自分のファイル → temporary_link でストリーミング
-      srcUrl = await dbxGetTemporaryLink(file.dbxPath);
-    } else if (file.dbxLinkUrl && file.dbxLinkPath) {
-      // 共有リンクのファイル → 直接URL (?dl=1) でストリーミング
-      srcUrl = buildSharedDirectUrl(file.dbxLinkUrl, file.dbxLinkPath);
-    } else if (file.dbxLinkUrl) {
-      // 個別ファイルの共有リンク
-      srcUrl = file.dbxLinkUrl.replace(/([?&])dl=0/, '$1dl=1');
-      if (!srcUrl.includes('dl=1')) srcUrl += (srcUrl.includes('?') ? '&' : '?') + 'dl=1';
-    } else {
-      // ローカル → blob URL
-      const blob = await getFileBlob(file);
-      if (pmCurrentObjectUrl) URL.revokeObjectURL(pmCurrentObjectUrl);
-      srcUrl = URL.createObjectURL(blob);
-      pmCurrentObjectUrl = srcUrl;
-    }
+    if (pmCurrentObjectUrl) { URL.revokeObjectURL(pmCurrentObjectUrl); pmCurrentObjectUrl = null; }
+    const { url: srcUrl, isBlob } = await resolveStreamUrl(file);
+    if (isBlob) pmCurrentObjectUrl = srcUrl;
     if (file.type === 'image') {
       els.pmBody.innerHTML = `<img src="${srcUrl}" alt="">`;
     } else if (file.type === 'video') {
@@ -2418,24 +2563,9 @@ async function playAudioFile(item, opts = {}) {
     return;
   }
   try {
-    let srcUrl;
-    if (item.dbxPath && state.dbxToken) {
-      // Dropbox 自分のファイル → temporary_link でブラウザネイティブストリーミング
-      srcUrl = await dbxGetTemporaryLink(item.dbxPath);
-    } else if (item.dbxLinkUrl && item.dbxLinkPath) {
-      // 共有リンクの音源 → 直接URL (?dl=1) でストリーミング、ダウンロードバー出ない
-      srcUrl = buildSharedDirectUrl(item.dbxLinkUrl, item.dbxLinkPath);
-    } else if (item.dbxLinkUrl) {
-      // 個別ファイルの共有リンク → そのまま dl=1 化
-      srcUrl = item.dbxLinkUrl.replace(/([?&])dl=0/, '$1dl=1');
-      if (!srcUrl.includes('dl=1')) srcUrl += (srcUrl.includes('?') ? '&' : '?') + 'dl=1';
-    } else {
-      // ローカル → blob URL
-      const f = await getFileBlob(item);
-      if (state.currentObjectUrl) URL.revokeObjectURL(state.currentObjectUrl);
-      srcUrl = URL.createObjectURL(f);
-      state.currentObjectUrl = srcUrl;
-    }
+    if (state.currentObjectUrl) { URL.revokeObjectURL(state.currentObjectUrl); state.currentObjectUrl = null; }
+    const { url: srcUrl, isBlob } = await resolveStreamUrl(item);
+    if (isBlob) state.currentObjectUrl = srcUrl;
     els.audio.src = srcUrl;
     els.audio.volume = parseFloat(els.volumeSlider.value);
     els.player.classList.remove('disabled');
@@ -2520,6 +2650,14 @@ els.segAudio.addEventListener('click', () => {
   els.segAll.classList.remove('active');
   renderColumns();
 });
+let searchDebounce = null;
+els.searchInput.addEventListener('input', () => {
+  clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(() => {
+    state.search = els.searchInput.value.trim().toLowerCase();
+    renderColumns();
+  }, 120);
+});
 els.viewThumb.addEventListener('click', () => {
   state.view = 'thumb';
   els.viewThumb.classList.add('active');
@@ -2595,6 +2733,16 @@ document.addEventListener('keydown', (e) => {
     else if (e.code === 'ArrowDown') { e.preventDefault(); previewNeighbor(1); }
     else if (e.code === 'ArrowUp') { e.preventDefault(); previewNeighbor(-1); }
     return;
+  }
+
+  // 1〜9 で PROJECTS 切替（修飾キーなし）
+  if (!e.metaKey && !e.ctrlKey && !e.altKey && /^Digit[1-9]$/.test(e.code)) {
+    const n = parseInt(e.code.slice(-1), 10) - 1;
+    if (state.projects[n]) {
+      e.preventDefault();
+      switchProject(state.projects[n].id);
+      return;
+    }
   }
 
   if (e.code === 'ArrowDown') { e.preventDefault(); selectNeighborFile(1); }
